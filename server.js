@@ -225,6 +225,26 @@ app.post('/delete-sound/:type', basicAuth, (req, res) => {
     res.json({ ok: true });
 });
 
+// アラート効果音(gift/follow/share)をライブラリのサウンドに設定 (soundId空でビープ音に戻す)
+app.post('/set-sound/:type', basicAuth, (req, res) => {
+    const type = (req.params.type || '').toLowerCase();
+    if (!SOUND_TYPES.includes(type)) return res.status(400).json({ error: '種類が不正です' });
+    const soundId = (req.body.soundId || '').toString().trim();
+    let sound = '';
+    if (soundId) {
+        const item = soundboard.library.find(l => l.id === soundId);
+        if (!item) return res.status(400).json({ error: 'ライブラリに存在しません' });
+        sound = item.file;
+    }
+    if (!config.alerts) config.alerts = {};
+    if (!config.alerts[type]) config.alerts[type] = {};
+    config.alerts[type].sound = sound;
+    saveConfig();
+    io.emit('config', config);
+    console.log(`[効果音] ${type} をライブラリ音に設定: ${sound || '(なし/ビープ)'}`);
+    res.json({ ok: true, sound });
+});
+
 // ---- サウンドボード API ----
 // 現在の内容 (overlayも使うので公開)
 app.get('/soundboard', (req, res) => res.json(soundboard));

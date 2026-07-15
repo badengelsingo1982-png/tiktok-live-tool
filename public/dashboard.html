@@ -53,6 +53,7 @@
   #log .system { color: var(--accent); }
   .hint { font-size: 12px; color: var(--sub); margin-top: 10px; line-height: 1.6; }
   code { background: #0a0d13; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+  select.soundsel { background: #0a0d13; border: 1px solid var(--line); color: var(--txt); border-radius: 8px; padding: 10px 12px; font-size: 14px; min-width: 220px; }
   /* ---- モーダル（ポップアップ登録） ---- */
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.6);
@@ -110,31 +111,25 @@
   </div>
 
   <div class="panel">
-    <label>効果音アップロード（mp3推奨・8MBまで）</label>
+    <label>アラート効果音（サウンドライブラリから選択）</label>
     <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px">
       <div class="row">
         <span style="width:96px">🎁 ギフト</span>
-        <input type="file" id="snd_gift" accept="audio/*">
-        <button class="ghost" onclick="uploadSound('gift')">アップロード</button>
-        <button class="ghost" onclick="deleteSound('gift')">削除</button>
-        <span class="k" id="sndstat_gift" style="color:var(--sub)">-</span>
+        <select id="alertsel_gift" class="soundsel"></select>
+        <button class="ghost" onclick="previewAlert('gift')">▶ 試聴</button>
       </div>
       <div class="row">
         <span style="width:96px">➕ フォロー</span>
-        <input type="file" id="snd_follow" accept="audio/*">
-        <button class="ghost" onclick="uploadSound('follow')">アップロード</button>
-        <button class="ghost" onclick="deleteSound('follow')">削除</button>
-        <span class="k" id="sndstat_follow" style="color:var(--sub)">-</span>
+        <select id="alertsel_follow" class="soundsel"></select>
+        <button class="ghost" onclick="previewAlert('follow')">▶ 試聴</button>
       </div>
       <div class="row">
         <span style="width:96px">🔁 シェア</span>
-        <input type="file" id="snd_share" accept="audio/*">
-        <button class="ghost" onclick="uploadSound('share')">アップロード</button>
-        <button class="ghost" onclick="deleteSound('share')">削除</button>
-        <span class="k" id="sndstat_share" style="color:var(--sub)">-</span>
+        <select id="alertsel_share" class="soundsel"></select>
+        <button class="ghost" onclick="previewAlert('share')">▶ 試聴</button>
       </div>
     </div>
-    <div class="hint">アップロードすると即反映されます（オーバーレイの再読み込み不要）。</div>
+    <div class="hint">下の「ギフト別サウンド」①ライブラリに追加した音から選べます（myinstantsやファイルから登録）。「なし」でビープ音。変更は即反映（オーバーレイ再読み込み不要）。</div>
   </div>
 
   <div class="panel">
@@ -203,10 +198,13 @@
 const socket = io({ auth: { token: window.__ADMIN_TOKEN__ || '' } });
 document.getElementById('overlayUrl').textContent = location.origin + '/overlay';
 
+let appConfig = {};
 socket.on('config', c => {
+  appConfig = c || {};
   if (c.username) document.getElementById('username').value = c.username;
   const ac = document.getElementById('autoConnect');
   if (ac) ac.checked = !!c.autoConnect;
+  renderAlertSelects();
 });
 socket.on('status', s => {
   document.getElementById('badge').className = 'badge ' + (s.connected ? 'on' : 'off');
@@ -249,44 +247,49 @@ document.getElementById('autoConnect').onchange = (e) => {
   });
 };
 
-// 効果音アップロード/削除 (fetchはページのBasic認証を自動で引き継ぐ)
-async function uploadSound(type) {
-  const input = document.getElementById('snd_' + type);
-  if (!input.files || !input.files[0]) { alert('ファイルを選択してください'); return; }
-  const fd = new FormData();
-  fd.append('sound', input.files[0]);
+// ---- アラート効果音: サウンドライブラリから選択 ----
+const ALERT_TYPES = ['gift', 'follow', 'share'];
+function renderAlertSelects() {
+  ALERT_TYPES.forEach(type => {
+    const sel = document.getElementById('alertsel_' + type);
+    if (!sel) return;
+    const cur = (appConfig.alerts && appConfig.alerts[type] && appConfig.alerts[type].sound) || '';
+    const inLib = soundboard.library.some(i => i.file === cur);
+    let opts = '<option value="">なし（ビープ音）</option>';
+    opts += soundboard.library.map(i => `<option value="${i.id}">${esc(i.name)}</option>`).join('');
+    // ライブラリに無い既存のアップロード音が設定されている場合は保持用の選択肢を出す
+    if (cur && !inLib) opts += '<option value="__keep__">（現在の設定音）</option>';
+    sel.innerHTML = opts;
+    const match = soundboard.library.find(i => i.file === cur);
+    sel.value = match ? match.id : (cur && !inLib ? '__keep__' : '');
+    sel.onchange = () => setAlertSound(type, sel.value);
+  });
+}
+async function setAlertSound(type, soundId) {
+  if (soundId === '__keep__') return; // 既存音の保持（変更なし）
   try {
-    const res = await fetch('/upload-sound/' + type, { method: 'POST', body: fd });
-    const j = await res.json().catch(() => ({}));
-    if (res.ok) { input.value = ''; refreshSounds(); }
-    else alert('アップロード失敗: ' + (j.error || res.status));
+    const res = await fetch('/set-sound/' + type, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ soundId })
+    });
+    if (!res.ok) { const j = await res.json().catch(() => ({})); alert('設定失敗: ' + (j.error || res.status)); }
   } catch (err) { alert('通信エラー: ' + err.message); }
 }
-async function deleteSound(type) {
-  if (!confirm(type + ' の効果音を削除してビープ音に戻しますか?')) return;
-  try {
-    const res = await fetch('/delete-sound/' + type, { method: 'POST' });
-    if (res.ok) refreshSounds(); else alert('削除に失敗しました');
-  } catch (err) { alert('通信エラー: ' + err.message); }
+function previewAlert(type) {
+  const sel = document.getElementById('alertsel_' + type);
+  if (!sel) return;
+  let file = '';
+  if (sel.value === '__keep__') file = (appConfig.alerts && appConfig.alerts[type] && appConfig.alerts[type].sound) || '';
+  else { const item = soundboard.library.find(i => i.id === sel.value); file = item ? item.file : ''; }
+  if (!file) { alert('「なし」に設定されています（ビープ音）'); return; }
+  new Audio(file).play().catch(() => {});
 }
-async function refreshSounds() {
-  try {
-    const res = await fetch('/sounds-status');
-    if (!res.ok) return;
-    const s = await res.json();
-    for (const t of ['gift', 'follow', 'share']) {
-      const el = document.getElementById('sndstat_' + t);
-      if (el) el.textContent = s[t] ? '✅ 設定済み' : '未設定(ビープ音)';
-    }
-  } catch (err) {}
-}
-refreshSounds();
 
 // ---- サウンドボード（ギフト別サウンド）----
 let soundboard = { library: [], giftRules: [] };
 const seenGifts = new Set();
 
-socket.on('soundboard', sb => { if (sb) { soundboard = sb; renderSoundboard(); } });
+socket.on('soundboard', sb => { if (sb) { soundboard = sb; renderSoundboard(); renderAlertSelects(); } });
 
 // 届いたギフト名を候補に蓄積
 socket.on('event', ev => {
