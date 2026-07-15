@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>TikTok LIVE ツール 管理画面</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0d1017">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="LIVEツール">
+<style>
+  :root {
+    --bg: #0d1017; --panel: #161b26; --line: #262d3d;
+    --txt: #e8eaf0; --sub: #8b93a7;
+    --accent: #ff2d55; --ok: #2dd4a7; --warn: #ffd166;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--txt);
+    font-family: "Hiragino Sans", "Noto Sans JP", sans-serif;
+    padding: 24px; max-width: 900px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; font-weight: 700; letter-spacing: 0.04em; margin-bottom: 20px; }
+  h1 .dot { color: var(--accent); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  label { font-size: 13px; color: var(--sub); }
+  input[type=text] {
+    background: #0a0d13; border: 1px solid var(--line); color: var(--txt);
+    border-radius: 8px; padding: 10px 14px; font-size: 15px; width: 240px;
+  }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 10px 20px; font-size: 14px; font-weight: 700; cursor: pointer;
+  }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--txt); }
+  button:hover { opacity: 0.85; }
+  .stats { display: flex; gap: 24px; margin-top: 14px; }
+  .stat .v { font-size: 26px; font-weight: 800; }
+  .stat .k { font-size: 12px; color: var(--sub); }
+  .badge { display: inline-block; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; }
+  .badge.on { background: rgba(45,212,167,0.15); color: var(--ok); }
+  .badge.off { background: rgba(255,45,85,0.12); color: var(--accent); }
+  #log {
+    height: 320px; overflow-y: auto; font-size: 13px; line-height: 1.7;
+    background: #0a0d13; border-radius: 8px; padding: 12px; border: 1px solid var(--line);
+  }
+  #log .t { color: var(--sub); margin-right: 8px; }
+  #log .gift { color: var(--warn); }
+  #log .follow { color: var(--ok); }
+  #log .system { color: var(--accent); }
+  .hint { font-size: 12px; color: var(--sub); margin-top: 10px; line-height: 1.6; }
+  code { background: #0a0d13; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+  /* ---- モーダル（ポップアップ登録） ---- */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center; z-index: 100; padding: 16px;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 24px; width: 100%; max-width: 420px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .modal h3 { font-size: 16px; font-weight: 700; margin-bottom: 16px; }
+  .modal .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .modal input[type=text] { width: 100%; }
+  .modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+  .modal-divider { border-top: 1px solid var(--line); text-align: center; margin: 18px 0 14px; }
+  .modal-divider span { position: relative; top: -10px; background: var(--panel); padding: 0 10px; font-size: 12px; color: var(--sub); }
+</style>
+</head>
+<body>
+  <h1>TikTok LIVE ツール <span class="dot">●</span> 管理画面</h1>
+
+  <div class="panel">
+    <div class="row">
+      <label>TikTokユーザー名</label>
+      <input type="text" id="username" placeholder="@なしで入力">
+      <button id="btnConnect">接続</button>
+      <button class="ghost" id="btnDisconnect">切断</button>
+      <span class="badge off" id="badge">未接続</span>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+        <input type="checkbox" id="autoConnect"> 自動接続（配信開始まで自動で繋ぐ／配信終了後は次を待機）
+      </label>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="v" id="stViewers">0</div><div class="k">視聴者</div></div>
+      <div class="stat"><div class="v" id="stLikes">0</div><div class="k">いいね</div></div>
+      <div class="stat"><div class="v" id="stDiamonds">0</div><div class="k">ダイヤ(累計)</div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <label>オーバーレイ動作テスト</label>
+      <button class="ghost" onclick="test('gift')">🎁 ギフト</button>
+      <button class="ghost" onclick="test('chat')">💬 コメント</button>
+      <button class="ghost" onclick="test('follow')">➕ フォロー</button>
+      <button class="ghost" onclick="test('like')">❤ いいね</button>
+    </div>
+    <div class="hint">
+      OBS / TikTok LIVE Studio のブラウザソースに <code id="overlayUrl">http://localhost:8181/overlay</code> を登録してください(幅1920 x 高さ1080推奨)。<br>
+      音声ファイルは下の「効果音アップロード」から設定できます(未設定の種類はビープ音)。
+    </div>
+  </div>
+
+  <div class="panel">
+    <label>効果音アップロード（mp3推奨・8MBまで）</label>
+    <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px">
+      <div class="row">
+        <span style="width:96px">🎁 ギフト</span>
+        <input type="file" id="snd_gift" accept="audio/*">
+        <button class="ghost" onclick="uploadSound('gift')">アップロード</button>
+        <button class="ghost" onclick="deleteSound('gift')">削除</button>
+        <span class="k" id="sndstat_gift" style="color:var(--sub)">-</span>
+      </div>
+      <div class="row">
+        <span style="width:96px">➕ フォロー</span>
+        <input type="file" id="snd_follow" accept="audio/*">
+        <button class="ghost" onclick="uploadSound('follow')">アップロード</button>
+        <button class="ghost" onclick="deleteSound('follow')">削除</button>
+        <span class="k" id="sndstat_follow" style="color:var(--sub)">-</span>
+      </div>
+      <div class="row">
+        <span style="width:96px">🔁 シェア</span>
+        <input type="file" id="snd_share" accept="audio/*">
+        <button class="ghost" onclick="uploadSound('share')">アップロード</button>
+        <button class="ghost" onclick="deleteSound('share')">削除</button>
+        <span class="k" id="sndstat_share" style="color:var(--sub)">-</span>
+      </div>
+    </div>
+    <div class="hint">アップロードすると即反映されます（オーバーレイの再読み込み不要）。</div>
+  </div>
+
+  <div class="panel">
+    <label>ギフト別サウンド（サウンドボード）</label>
+
+    <div style="margin-top:12px">
+      <div class="row" style="justify-content:space-between">
+        <div class="k" style="color:var(--sub)">① サウンドライブラリ</div>
+        <button onclick="openLibModal()">＋ サウンドを追加</button>
+      </div>
+      <div id="libList" style="display:flex; flex-direction:column; gap:6px; margin-top:12px"></div>
+    </div>
+
+    <div style="margin-top:16px">
+      <div class="k" style="color:var(--sub); margin-bottom:6px">② ギフトにサウンドを割り当て</div>
+      <div class="row">
+        <input type="text" id="ruleGift" placeholder="ギフト名（例：Rose）" list="giftNames" style="width:180px">
+        <datalist id="giftNames"></datalist>
+        <select id="ruleSound" style="background:#0a0d13; border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:10px 12px"></select>
+        <button onclick="addRule()">割当</button>
+      </div>
+      <div id="ruleList" style="margin-top:10px; display:flex; flex-direction:column; gap:6px"></div>
+      <div class="hint">ギフト名は届いたギフトから自動で候補表示されます。割当が無いギフトは既定のギフト音が鳴ります。</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <label>イベントログ</label>
+    <div id="log" style="margin-top:10px"></div>
+  </div>
+
+  <!-- サウンド追加ポップアップ -->
+  <div class="modal-overlay" id="libModal">
+    <div class="modal">
+      <h3>サウンドをライブラリに追加</h3>
+
+      <div class="field">
+        <label>myinstants から探す</label>
+        <div class="row" style="gap:8px">
+          <input type="text" id="miQuery" placeholder="キーワード（例：拍手 / clap）" style="flex:1; min-width:0">
+          <button id="miSearchBtn" onclick="searchMyinstants()">検索</button>
+        </div>
+      </div>
+      <div id="miResults" style="max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:6px"></div>
+
+      <div class="modal-divider"><span>または ファイルから追加</span></div>
+
+      <div class="field">
+        <label>サウンド名</label>
+        <input type="text" id="libName" placeholder="例：拍手">
+      </div>
+      <div class="field">
+        <label>音声ファイル（mp3推奨・8MBまで）</label>
+        <input type="file" id="libFile" accept="audio/*">
+      </div>
+      <div class="actions">
+        <button class="ghost" onclick="closeLibModal()">閉じる</button>
+        <button id="libAddBtn" onclick="uploadLibSound()">ファイルを追加</button>
+      </div>
+    </div>
+  </div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+// 管理socketは注入されたトークンで認証 (これが無いと接続/切断/テストは拒否される)
+const socket = io({ auth: { token: window.__ADMIN_TOKEN__ || '' } });
+document.getElementById('overlayUrl').textContent = location.origin + '/overlay';
+
+socket.on('config', c => {
+  if (c.username) document.getElementById('username').value = c.username;
+  const ac = document.getElementById('autoConnect');
+  if (ac) ac.checked = !!c.autoConnect;
+});
+socket.on('status', s => {
+  document.getElementById('badge').className = 'badge ' + (s.connected ? 'on' : 'off');
+  document.getElementById('badge').textContent = s.connected ? '接続中 @' + s.username : '未接続';
+  document.getElementById('stViewers').textContent = (s.viewers || 0).toLocaleString();
+  document.getElementById('stLikes').textContent = (s.likes || 0).toLocaleString();
+  document.getElementById('stDiamonds').textContent = (s.diamonds || 0).toLocaleString();
+});
+socket.on('event', ev => {
+  const log = document.getElementById('log');
+  const d = new Date(ev.time);
+  const t = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
+  let body = '';
+  if (ev.type === 'chat') body = `<b>${esc(ev.nickname)}</b>: ${esc(ev.comment)}`;
+  else if (ev.type === 'gift') body = `<span class="gift">🎁 <b>${esc(ev.nickname)}</b> → ${esc(ev.giftName)} x${ev.count} (${ev.diamonds}💎)</span>`;
+  else if (ev.type === 'follow') body = `<span class="follow">➕ <b>${esc(ev.nickname)}</b> がフォロー</span>`;
+  else if (ev.type === 'share') body = `<span class="follow">🔁 <b>${esc(ev.nickname)}</b> がシェア</span>`;
+  else if (ev.type === 'member') body = `<span style="color:var(--sub)">入室: ${esc(ev.nickname)}</span>`;
+  else if (ev.type === 'like') return;
+  else if (ev.type === 'system') body = `<span class="system">⚙ ${esc(ev.message)}</span>`;
+  else return;
+  const div = document.createElement('div');
+  div.innerHTML = `<span class="t">${t}</span>` + body;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  while (log.children.length > 200) log.removeChild(log.firstChild);
+});
+
+document.getElementById('btnConnect').onclick = () => {
+  socket.emit('connectLive', document.getElementById('username').value);
+};
+document.getElementById('btnDisconnect').onclick = () => socket.emit('disconnectLive');
+function test(type) { socket.emit('test', type); }
+
+// 自動接続 ON/OFF
+document.getElementById('autoConnect').onchange = (e) => {
+  socket.emit('setAutoConnect', {
+    enabled: e.target.checked,
+    username: document.getElementById('username').value
+  });
+};
+
+// 効果音アップロード/削除 (fetchはページのBasic認証を自動で引き継ぐ)
+async function uploadSound(type) {
+  const input = document.getElementById('snd_' + type);
+  if (!input.files || !input.files[0]) { alert('ファイルを選択してください'); return; }
+  const fd = new FormData();
+  fd.append('sound', input.files[0]);
+  try {
+    const res = await fetch('/upload-sound/' + type, { method: 'POST', body: fd });
+    const j = await res.json().catch(() => ({}));
+    if (res.ok) { input.value = ''; refreshSounds(); }
+    else alert('アップロード失敗: ' + (j.error || res.status));
+  } catch (err) { alert('通信エラー: ' + err.message); }
+}
+async function deleteSound(type) {
+  if (!confirm(type + ' の効果音を削除してビープ音に戻しますか?')) return;
+  try {
+    const res = await fetch('/delete-sound/' + type, { method: 'POST' });
+    if (res.ok) refreshSounds(); else alert('削除に失敗しました');
+  } catch (err) { alert('通信エラー: ' + err.message); }
+}
+async function refreshSounds() {
+  try {
+    const res = await fetch('/sounds-status');
+    if (!res.ok) return;
+    const s = await res.json();
+    for (const t of ['gift', 'follow', 'share']) {
+      const el = document.getElementById('sndstat_' + t);
+      if (el) el.textContent = s[t] ? '✅ 設定済み' : '未設定(ビープ音)';
+    }
+  } catch (err) {}
+}
+refreshSounds();
+
+// ---- サウンドボード（ギフト別サウンド）----
+let soundboard = { library: [], giftRules: [] };
+const seenGifts = new Set();
+
+socket.on('soundboard', sb => { if (sb) { soundboard = sb; renderSoundboard(); } });
+
+// 届いたギフト名を候補に蓄積
+socket.on('event', ev => {
+  if (ev.type === 'gift' && ev.giftName && !seenGifts.has(ev.giftName)) {
+    seenGifts.add(ev.giftName);
+    renderGiftNames();
+  }
+});
+
+function renderGiftNames() {
+  const dl = document.getElementById('giftNames');
+  dl.innerHTML = [...seenGifts].map(g => `<option value="${esc(g)}">`).join('');
+}
+
+function renderSoundboard() {
+  // ライブラリ一覧
+  const lib = document.getElementById('libList');
+  if (!soundboard.library.length) {
+    lib.innerHTML = '<span class="k" style="color:var(--sub)">まだサウンドがありません</span>';
+  } else {
+    lib.innerHTML = '';
+    soundboard.library.forEach(item => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `<span style="min-width:160px">${esc(item.name)}</span>`;
+      const play = document.createElement('button'); play.className = 'ghost'; play.textContent = '▶ 試聴';
+      play.onclick = () => { new Audio(item.file).play().catch(() => {}); };
+      const del = document.createElement('button'); del.className = 'ghost'; del.textContent = '削除';
+      del.onclick = () => deleteLibSound(item.id, item.name);
+      row.appendChild(play); row.appendChild(del);
+      lib.appendChild(row);
+    });
+  }
+  // 割当用セレクト
+  const sel = document.getElementById('ruleSound');
+  sel.innerHTML = soundboard.library.map(i => `<option value="${i.id}">${esc(i.name)}</option>`).join('')
+    || '<option value="">(ライブラリが空)</option>';
+  // 割当ルール一覧
+  const rl = document.getElementById('ruleList');
+  if (!soundboard.giftRules.length) {
+    rl.innerHTML = '<span class="k" style="color:var(--sub)">割当なし</span>';
+  } else {
+    rl.innerHTML = '';
+    soundboard.giftRules.forEach(rule => {
+      const snd = soundboard.library.find(l => l.id === rule.soundId);
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `<span style="min-width:160px">🎁 <b>${esc(rule.gift)}</b></span><span style="color:var(--sub)">→ ${esc(snd ? snd.name : '(不明)')}</span>`;
+      const rm = document.createElement('button'); rm.className = 'ghost'; rm.textContent = '解除';
+      rm.onclick = () => removeRule(rule.gift);
+      row.appendChild(rm);
+      rl.appendChild(row);
+    });
+  }
+}
+
+// ---- サウンド追加ポップアップ ----
+let miAudio = null;
+function openLibModal() {
+  document.getElementById('libName').value = '';
+  document.getElementById('libFile').value = '';
+  document.getElementById('miQuery').value = '';
+  document.getElementById('miResults').innerHTML = '';
+  document.getElementById('libModal').classList.add('open');
+  document.getElementById('miQuery').focus();
+}
+function closeLibModal() {
+  if (miAudio) { try { miAudio.pause(); } catch (e) {} miAudio = null; }
+  document.getElementById('libModal').classList.remove('open');
+}
+
+// ---- myinstants から検索してインポート ----
+async function searchMyinstants() {
+  const q = document.getElementById('miQuery').value.trim();
+  const box = document.getElementById('miResults');
+  if (q.length < 2) { alert('2文字以上で検索してください'); return; }
+  const btn = document.getElementById('miSearchBtn');
+  btn.disabled = true;
+  box.innerHTML = '<span class="k" style="color:var(--sub)">検索中…</span>';
+  try {
+    const res = await fetch('/myinstants/search?q=' + encodeURIComponent(q));
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) { box.innerHTML = `<span class="k" style="color:var(--accent)">${esc(j.error || '検索失敗')}</span>`; return; }
+    if (!j.items || !j.items.length) { box.innerHTML = '<span class="k" style="color:var(--sub)">見つかりませんでした</span>'; return; }
+    box.innerHTML = '';
+    j.items.forEach(it => {
+      const row = document.createElement('div');
+      row.className = 'row'; row.style.gap = '8px';
+      const nm = document.createElement('span');
+      nm.style.cssText = 'flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px';
+      nm.textContent = it.name;
+      const prev = document.createElement('button');
+      prev.className = 'ghost'; prev.textContent = '▶'; prev.title = '試聴';
+      prev.onclick = () => {
+        try { if (miAudio) miAudio.pause(); miAudio = new Audio('https://www.myinstants.com' + it.mp3); miAudio.play().catch(() => {}); } catch (e) {}
+      };
+      const add = document.createElement('button');
+      add.textContent = '追加';
+      add.onclick = () => importMyinstants(it, add);
+      row.appendChild(nm); row.appendChild(prev); row.appendChild(add);
+      box.appendChild(row);
+    });
+  } catch (e) {
+    box.innerHTML = `<span class="k" style="color:var(--accent)">通信エラー: ${esc(e.message)}</span>`;
+  } finally { btn.disabled = false; }
+}
+
+async function importMyinstants(it, btn) {
+  btn.disabled = true; const orig = btn.textContent; btn.textContent = '追加中…';
+  try {
+    const res = await fetch('/soundboard/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: it.name, mp3: it.mp3 })
+    });
+    const j = await res.json().catch(() => ({}));
+    if (res.ok) { btn.textContent = '✓ 追加済み'; }
+    else { alert('追加失敗: ' + (j.error || res.status)); btn.disabled = false; btn.textContent = orig; }
+  } catch (e) { alert('通信エラー: ' + e.message); btn.disabled = false; btn.textContent = orig; }
+}
+// Enterキーで検索
+document.getElementById('miQuery').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); searchMyinstants(); }
+});
+// 背景クリック・Escで閉じる
+document.getElementById('libModal').addEventListener('click', e => {
+  if (e.target.id === 'libModal') closeLibModal();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeLibModal();
+});
+
+async function uploadLibSound() {
+  const name = document.getElementById('libName').value.trim();
+  const file = document.getElementById('libFile').files[0];
+  if (!file) { alert('ファイルを選択してください'); return; }
+  const btn = document.getElementById('libAddBtn');
+  btn.disabled = true;
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('sound', file);
+  try {
+    const res = await fetch('/soundboard/upload', { method: 'POST', body: fd });
+    const j = await res.json().catch(() => ({}));
+    if (res.ok) closeLibModal();
+    else alert('追加失敗: ' + (j.error || res.status));
+  } catch (e) { alert('通信エラー: ' + e.message); }
+  finally { btn.disabled = false; }
+}
+async function deleteLibSound(id, name) {
+  if (!confirm('「' + name + '」を削除しますか?（割当も解除されます）')) return;
+  try { await fetch('/soundboard/library/' + id, { method: 'DELETE' }); }
+  catch (e) { alert('通信エラー: ' + e.message); }
+}
+async function addRule() {
+  const gift = document.getElementById('ruleGift').value.trim();
+  const soundId = document.getElementById('ruleSound').value;
+  if (!gift) { alert('ギフト名を入力してください'); return; }
+  if (!soundId) { alert('先にライブラリへサウンドを追加してください'); return; }
+  try {
+    const res = await fetch('/soundboard/rule', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ gift, soundId })
+    });
+    if (res.ok) document.getElementById('ruleGift').value = '';
+    else alert('割当失敗');
+  } catch (e) { alert('通信エラー: ' + e.message); }
+}
+async function removeRule(gift) {
+  try {
+    await fetch('/soundboard/rule', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ gift, soundId: '' })
+    });
+  } catch (e) { alert('通信エラー: ' + e.message); }
+}
+
+// PWA: Service Worker 登録
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>

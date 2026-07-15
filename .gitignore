@@ -1,0 +1,12 @@
+node_modules/
+auth.json
+*.log
+npm-debug.log*
+.DS_Store
+*.zip
+
+# 実行時に生成/アップロードされるデータ（サーバーごとに固有。Git管理しない）
+soundboard.json
+sounds/*.mp3
+sounds/lib/
+public/icons/

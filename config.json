@@ -1,0 +1,22 @@
+{
+  "username": "",
+  "port": 8181,
+  "autoConnect": false,
+  "tts": {
+    "enabled": true,
+    "readComments": true,
+    "readGifts": true,
+    "lang": "ja-JP",
+    "rate": 1.1,
+    "maxLength": 60
+  },
+  "alerts": {
+    "gift": { "enabled": true, "sound": "/sounds/gift.mp3", "minDiamonds": 1, "duration": 6000 },
+    "follow": { "enabled": true, "sound": "/sounds/follow.mp3", "duration": 4000 },
+    "share": { "enabled": true, "sound": "", "duration": 4000 }
+  },
+  "chatOverlay": {
+    "enabled": true,
+    "maxMessages": 8
+  }
+}

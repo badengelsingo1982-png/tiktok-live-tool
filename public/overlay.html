@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>Overlay</title>
+<style>
+  /* OBSブラウザソース用: 背景は完全透過 */
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; width: 100vw; height: 100vh; }
+  * { box-sizing: border-box; font-family: "Hiragino Sans", "Noto Sans JP", sans-serif; }
+
+  /* ---- ギフト/フォローアラート (中央上部) ---- */
+  #alert {
+    position: absolute; top: 8vh; left: 50%; transform: translateX(-50%) scale(0.6);
+    display: none; align-items: center; gap: 16px;
+    padding: 18px 32px; border-radius: 20px;
+    background: rgba(15, 15, 25, 0.82);
+    border: 2px solid #ff2d55;
+    box-shadow: 0 0 30px rgba(255, 45, 85, 0.55);
+    opacity: 0; transition: none;
+  }
+  #alert.show { display: flex; animation: pop 0.45s cubic-bezier(.2,1.6,.4,1) forwards; }
+  #alert.hide { animation: fadeout 0.4s ease forwards; }
+  @keyframes pop { to { opacity: 1; transform: translateX(-50%) scale(1); } }
+  @keyframes fadeout { from { opacity: 1; } to { opacity: 0; transform: translateX(-50%) scale(0.85); } }
+
+  #alert img.avatar { width: 56px; height: 56px; border-radius: 50%; border: 2px solid #fff; }
+  #alert img.gift { width: 64px; height: 64px; }
+  #alert .txt { color: #fff; }
+  #alert .txt .name { font-size: 22px; font-weight: 700; color: #ffd166; }
+  #alert .txt .desc { font-size: 26px; font-weight: 800; margin-top: 2px; }
+  #alert .txt .desc .count { color: #ff2d55; font-size: 32px; }
+
+  /* ---- コメント欄 (左下) ---- */
+  #chat {
+    position: absolute; left: 20px; bottom: 20px; width: 420px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .msg {
+    display: flex; align-items: flex-start; gap: 10px;
+    background: rgba(10, 10, 18, 0.65); border-radius: 14px;
+    padding: 8px 14px; color: #fff;
+    animation: slidein 0.3s ease;
+  }
+  @keyframes slidein { from { opacity: 0; transform: translateX(-30px); } to { opacity: 1; transform: none; } }
+  .msg img { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; }
+  .msg .noavatar { width: 32px; height: 32px; border-radius: 50%; background: #444; flex-shrink: 0; }
+  .msg .name { font-size: 13px; color: #9be3ff; font-weight: 600; }
+  .msg .body { font-size: 16px; line-height: 1.4; word-break: break-word; }
+  .msg.event .body { color: #ffd166; font-weight: 700; }
+
+  /* ---- いいねカウンター (右下) ---- */
+  #likes {
+    position: absolute; right: 24px; bottom: 24px;
+    background: rgba(10,10,18,0.65); color: #fff;
+    border-radius: 999px; padding: 10px 22px;
+    font-size: 20px; font-weight: 700;
+  }
+  #likes .heart { color: #ff2d55; }
+</style>
+</head>
+<body>
+  <div id="alert">
+    <img class="avatar" id="alertAvatar" alt="" style="display:none">
+    <div class="txt">
+      <div class="name" id="alertName"></div>
+      <div class="desc" id="alertDesc"></div>
+    </div>
+    <img class="gift" id="alertGift" alt="" style="display:none">
+  </div>
+
+  <div id="chat"></div>
+  <div id="likes"><span class="heart">&#10084;</span> <span id="likeCount">0</span></div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+let config = null;
+socket.on('config', c => { config = c; });
+
+// ギフト別サウンド (サウンドボード)
+let soundboard = { library: [], giftRules: [] };
+socket.on('soundboard', sb => { if (sb) soundboard = sb; });
+function giftSoundFor(giftName, fallback) {
+  try {
+    const rule = soundboard.giftRules.find(r => r.gift && r.gift.toLowerCase() === String(giftName || '').toLowerCase());
+    if (rule) {
+      const lib = soundboard.library.find(l => l.id === rule.soundId);
+      if (lib) return lib.file;
+    }
+  } catch (e) {}
+  return fallback;
+}
+socket.on('status', s => {
+  document.getElementById('likeCount').textContent = (s.likes || 0).toLocaleString();
+});
+
+// ---- 音声再生 (mp3が無ければWebAudioビープにフォールバック) ----
+let audioCtx = null;
+function beep(freq, dur) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.connect(g); g.connect(audioCtx.destination);
+    o.frequency.value = freq; o.type = 'sine';
+    g.gain.setValueAtTime(0.25, audioCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + dur);
+    o.start(); o.stop(audioCtx.currentTime + dur);
+  } catch (e) {}
+}
+function playSound(url, fallbackFreq) {
+  if (url) {
+    const a = new Audio(url);
+    a.play().catch(() => beep(fallbackFreq, 0.5));
+  } else {
+    beep(fallbackFreq, 0.5);
+  }
+}
+
+// ---- TTS (読み上げ) ----
+const ttsQueue = [];
+let speaking = false;
+function speak(text) {
+  if (!config || !config.tts || !config.tts.enabled) return;
+  const max = config.tts.maxLength || 60;
+  ttsQueue.push(text.slice(0, max));
+  processTts();
+}
+function processTts() {
+  if (speaking || ttsQueue.length === 0) return;
+  speaking = true;
+  const u = new SpeechSynthesisUtterance(ttsQueue.shift());
+  u.lang = (config.tts.lang || 'ja-JP');
+  u.rate = config.tts.rate || 1.0;
+  u.onend = u.onerror = () => { speaking = false; processTts(); };
+  speechSynthesis.speak(u);
+}
+
+// ---- アラート表示 ----
+const alertQueue = [];
+let alertShowing = false;
+function showAlert(item) {
+  alertQueue.push(item);
+  processAlert();
+}
+function processAlert() {
+  if (alertShowing || alertQueue.length === 0) return;
+  alertShowing = true;
+  const item = alertQueue.shift();
+  const box = document.getElementById('alert');
+  const av = document.getElementById('alertAvatar');
+  const gi = document.getElementById('alertGift');
+  document.getElementById('alertName').textContent = item.name;
+  document.getElementById('alertDesc').innerHTML = item.desc;
+  if (item.avatar) { av.src = item.avatar; av.style.display = ''; } else { av.style.display = 'none'; }
+  if (item.giftImage) { gi.src = item.giftImage; gi.style.display = ''; } else { gi.style.display = 'none'; }
+  box.classList.remove('hide');
+  box.classList.add('show');
+  playSound(item.sound, item.freq || 880);
+  if (item.tts) speak(item.tts);
+  setTimeout(() => {
+    box.classList.add('hide');
+    setTimeout(() => {
+      box.classList.remove('show', 'hide');
+      box.style.display = 'none';
+      alertShowing = false;
+      processAlert();
+    }, 450);
+  }, item.duration || 5000);
+}
+
+// ---- コメント欄 ----
+function addChat(user, text, isEvent) {
+  if (config && config.chatOverlay && !config.chatOverlay.enabled) return;
+  const chat = document.getElementById('chat');
+  const div = document.createElement('div');
+  div.className = 'msg' + (isEvent ? ' event' : '');
+  div.innerHTML =
+    (user.avatar ? '<img src="' + user.avatar + '" alt="">' : '<div class="noavatar"></div>') +
+    '<div><div class="name">' + esc(user.nickname) + '</div>' +
+    '<div class="body">' + esc(text) + '</div></div>';
+  chat.appendChild(div);
+  const max = (config && config.chatOverlay && config.chatOverlay.maxMessages) || 8;
+  while (chat.children.length > max) chat.removeChild(chat.firstChild);
+}
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// ---- イベント受信 ----
+socket.on('event', ev => {
+  const a = (config && config.alerts) || {};
+  switch (ev.type) {
+    case 'chat':
+      addChat(ev, ev.comment, false);
+      if (config && config.tts && config.tts.readComments) {
+        speak(ev.nickname + 'さん、' + ev.comment);
+      }
+      break;
+
+    case 'gift': {
+      const cfg = a.gift || {};
+      if (cfg.enabled === false) break;
+      if ((ev.diamonds || 0) < (cfg.minDiamonds || 0)) break;
+      showAlert({
+        name: ev.nickname + ' さん',
+        desc: esc(ev.giftName) + ' <span class="count">x' + ev.count + '</span> ありがとう!',
+        avatar: ev.avatar,
+        giftImage: ev.giftImage,
+        sound: giftSoundFor(ev.giftName, cfg.sound),
+        freq: 1046,
+        duration: cfg.duration || 6000,
+        tts: (config.tts && config.tts.readGifts) ? (ev.nickname + 'さん、' + ev.giftName + ' ' + ev.count + '個ありがとうございます!') : null
+      });
+      addChat(ev, '🎁 ' + ev.giftName + ' x' + ev.count, true);
+      break;
+    }
+
+    case 'follow': {
+      const cfg = a.follow || {};
+      if (cfg.enabled === false) break;
+      showAlert({
+        name: ev.nickname + ' さん',
+        desc: 'フォローありがとう!',
+        avatar: ev.avatar,
+        sound: cfg.sound,
+        freq: 784,
+        duration: cfg.duration || 4000,
+        tts: ev.nickname + 'さん、フォローありがとうございます!'
+      });
+      break;
+    }
+
+    case 'share': {
+      const cfg = a.share || {};
+      if (cfg.enabled === false) break;
+      showAlert({
+        name: ev.nickname + ' さん',
+        desc: 'シェアありがとう!',
+        avatar: ev.avatar,
+        sound: cfg.sound,
+        freq: 659,
+        duration: cfg.duration || 4000
+      });
+      break;
+    }
+
+    case 'system':
+      addChat({ nickname: 'システム', avatar: '' }, ev.message, true);
+      break;
+  }
+});
+</script>
+</body>
+</html>
