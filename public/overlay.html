@@ -2,8 +2,16 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow, noarchive">
 <title>Overlay</title>
+<!-- PWA: 2台目端末でホーム画面アプリ化(全画面・前面運用向け)。OBSでは無視される -->
+<link rel="manifest" href="/overlay.webmanifest">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="LIVE通知">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
 <style>
   /* OBSブラウザソース用: 背景は完全透過 */
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; width: 100vw; height: 100vh; }
@@ -182,6 +190,10 @@ if (!isOBS) {
   window.addEventListener('pageshow', resumeAudio);
   // 定期ハートビート: 10秒の停止タイマーに間に合うよう8秒ごとに無音を鳴らし直す
   setInterval(resumeAudio, 8000);
+  // PWA(ホーム画面アプリ)化のためService Worker登録。OBSでは登録しない
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  }
 }
 
 function ensureAudioCtx() {
