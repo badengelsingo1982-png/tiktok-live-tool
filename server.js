@@ -430,10 +430,33 @@ app.get('/s/:user/lib/:file', (req, res) => sendSound(res, req.params.user, path
 app.get('/s/:user/:file', (req, res) => sendSound(res, req.params.user, path.basename(req.params.file)));
 
 // ---- 静的 & オーバーレイ ----
+// PWA: ホーム画面に追加した時に ?u=<ユーザー名> を保持するため、manifest をユーザーごとに生成する。
+// (静的配信より先に登録してこちらを優先させる)
+app.get('/overlay.webmanifest', (req, res) => {
+    const m = readJSON(path.join(__dirname, 'public', 'overlay.webmanifest'), {});
+    const key = normKey(req.query.u);
+    if (key) {
+        const url = '/overlay?u=' + encodeURIComponent(key);
+        const label = users[key] ? users[key].username : key;
+        m.id = url;              // ユーザーごとに別アプリとしてインストールできるようにする
+        m.start_url = url;
+        m.name = `LIVE通知オーバーレイ (${label})`;
+        m.short_name = `LIVE通知 ${label}`;
+    }
+    res.set('Cache-Control', 'no-store');
+    res.type('application/manifest+json').send(JSON.stringify(m));
+});
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/overlay', (req, res) => {
+    // manifest の参照先に ?u= を引き継ぐ。これが無いとインストール後に /overlay へ落ちる
+    let html = fs.readFileSync(path.join(__dirname, 'public', 'overlay.html'), 'utf8');
+    const key = normKey(req.query.u);
+    if (key) {
+        html = html.replace('href="/overlay.webmanifest"',
+            `href="/overlay.webmanifest?u=${encodeURIComponent(key)}"`);
+    }
     res.set('Cache-Control', 'no-store');
-    res.sendFile(path.join(__dirname, 'public', 'overlay.html'));
+    res.type('html').send(html);
 });
 
 // ============================================================
