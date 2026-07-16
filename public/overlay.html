@@ -116,6 +116,11 @@ socket.on('status', s => {
 let audioCtx = null;
 let audioUnlocked = false;
 const isOBS = !!window.obsstudio;
+// 無音WAV(HTMLAudioElementのアンロック用)
+const SILENT_WAV = 'data:audio/wav;base64,UklGRuwAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YcgAAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==';
+// mp3再生用の使い回しAudio要素(iOSはこの1要素をジェスチャ内でアンロックすれば以降再生可能)
+const sfx = new Audio();
+sfx.preload = 'auto';
 function ensureAudioCtx() {
   if (!audioCtx) {
     try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
@@ -125,13 +130,19 @@ function ensureAudioCtx() {
 function unlockAudio() {
   ensureAudioCtx();
   try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (e) {}
-  // 無音を1発鳴らして再生権限を獲得
+  // WebAudio: 無音を1発鳴らして再生権限を獲得 (ビープ用)
   try {
     if (audioCtx) {
       const b = audioCtx.createBuffer(1, 1, 22050);
       const src = audioCtx.createBufferSource();
       src.buffer = b; src.connect(audioCtx.destination); src.start(0);
     }
+  } catch (e) {}
+  // HTMLAudioElement: 無音WAVを再生してアンロック (mp3効果音用。iOSはこれが別枠)
+  try {
+    sfx.src = SILENT_WAV;
+    const p = sfx.play();
+    if (p && p.then) p.then(() => { try { sfx.pause(); sfx.currentTime = 0; } catch (e) {} }).catch(() => {});
   } catch (e) {}
   // TTS(speechSynthesis)も無音発話でウォームアップ
   try {
@@ -173,8 +184,15 @@ function beep(freq, dur) {
 }
 function playSound(url, fallbackFreq) {
   if (url) {
-    const a = new Audio(url);
-    a.play().catch(() => beep(fallbackFreq, 0.5));
+    // アンロック済みのsfx要素を使い回す(iOSで new Audio() が鳴らない対策)。失敗時はビープ
+    try {
+      sfx.src = url;
+      sfx.currentTime = 0;
+      const p = sfx.play();
+      if (p && p.catch) p.catch(() => beep(fallbackFreq, 0.5));
+    } catch (e) {
+      beep(fallbackFreq, 0.5);
+    }
   } else {
     beep(fallbackFreq, 0.5);
   }
