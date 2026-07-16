@@ -151,10 +151,10 @@ function startKeepAlive() {
       keepAlive = new Audio(makeSilentWavUrl(1));
       keepAlive.loop = true;
     }
-    if (keepAlive.paused) {
-      const p = keepAlive.play();
-      if (p && p.catch) p.catch(() => {});
-    }
+    // 停止していなくても頭出しして鳴らし直す(iOSの再生停止タイマーをリセットする狙い)
+    try { keepAlive.currentTime = 0; } catch (e) {}
+    const p = keepAlive.play();
+    if (p && p.catch) p.catch(() => {});
     setupMediaSession();
   } catch (e) {}
 }
@@ -180,8 +180,8 @@ if (!isOBS) {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) resumeAudio(); });
   window.addEventListener('focus', resumeAudio);
   window.addEventListener('pageshow', resumeAudio);
-  // 定期ハートビート(前面時は毎回、背面でも復帰時に効く)
-  setInterval(resumeAudio, 20000);
+  // 定期ハートビート: 10秒の停止タイマーに間に合うよう8秒ごとに無音を鳴らし直す
+  setInterval(resumeAudio, 8000);
 }
 
 function ensureAudioCtx() {
