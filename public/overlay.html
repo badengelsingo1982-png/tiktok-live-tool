@@ -99,7 +99,14 @@
 <script>
 const socket = io();
 let config = null;
-socket.on('config', c => { config = c; });
+socket.on('config', c => { config = c; applyEq(); });
+
+// ---- 自動リロード: サーバーのビルドIDが変わったら(=更新デプロイ)自動で最新版に ----
+let myBuildId = null;
+socket.on('buildId', id => {
+  if (myBuildId && id && id !== myBuildId) { location.reload(); return; }
+  myBuildId = id;
+});
 
 // ギフト別サウンド (サウンドボード)
 let soundboard = { library: [], giftRules: [] };
@@ -129,6 +136,38 @@ const SILENT_WAV = 'data:audio/wav;base64,UklGRuwAAABXQVZFZm10IBAAAAABAAEAQB8AAE
 // mp3再生用の使い回しAudio要素(iOSはこの1要素をジェスチャ内でアンロックすれば以降再生可能)
 const sfx = new Audio();
 sfx.preload = 'auto';
+
+// ---- サウンドEQ(イコライザー): 効果音を低/中/高音・全体音量で調整 ----
+// config.audio = { eqEnabled, eqLow, eqMid, eqHigh, volume }。有効時のみWeb Audio経由に切替。
+let eqGraph = null, eqFailed = false;
+function ensureEqGraph() {
+  if (eqGraph || eqFailed) return eqGraph;
+  if (!ensureAudioCtx()) return null;
+  try {
+    const source = audioCtx.createMediaElementSource(sfx);
+    const low = audioCtx.createBiquadFilter(); low.type = 'lowshelf'; low.frequency.value = 200;
+    const mid = audioCtx.createBiquadFilter(); mid.type = 'peaking'; mid.frequency.value = 1000; mid.Q.value = 1;
+    const high = audioCtx.createBiquadFilter(); high.type = 'highshelf'; high.frequency.value = 3500;
+    const gain = audioCtx.createGain();
+    source.connect(low); low.connect(mid); mid.connect(high); high.connect(gain); gain.connect(audioCtx.destination);
+    eqGraph = { source, low, mid, high, gain };
+    applyEq();
+  } catch (e) { eqFailed = true; } // 失敗時は通常再生(sfx直接)にフォールバック
+  return eqGraph;
+}
+function applyEq() {
+  const a = (config && config.audio) || {};
+  // EQ有効かつまだ経由していなければ、この時点でWeb Audioに接続
+  if (a.eqEnabled && !eqGraph && !eqFailed) ensureEqGraph();
+  if (!eqGraph) return;
+  try {
+    const on = !!a.eqEnabled;
+    eqGraph.low.gain.value  = on ? (+a.eqLow  || 0) : 0;
+    eqGraph.mid.gain.value  = on ? (+a.eqMid  || 0) : 0;
+    eqGraph.high.gain.value = on ? (+a.eqHigh || 0) : 0;
+    eqGraph.gain.gain.value = on ? (a.volume == null ? 1 : +a.volume) : 1;
+  } catch (e) {}
+}
 
 // ---- バックグラウンド維持: 無音ループを常時再生してオーディオセッションを生かす ----
 // iOS/スマホのブラウザはバックグラウンドのタブを数分でサスペンドし、AudioContext/TTSが
@@ -245,6 +284,15 @@ if (isOBS) {
 ['click', 'touchend', 'keydown'].forEach(evt =>
   window.addEventListener(evt, () => { if (!audioUnlocked) unlockAudio(); }, { passive: true })
 );
+// 自動アンロック試行: iOS以外(PC/Android/OBS)は操作なしで有効化できる。
+// iOSは失敗するのでタップ待ち表示のまま(仕様上タップ1回は省略不可)。
+if (!isOBS && tapEl) {
+  try {
+    const test = new Audio(SILENT_WAV);
+    const p = test.play();
+    if (p && p.then) p.then(() => { try { test.pause(); } catch (e) {} if (!audioUnlocked) unlockAudio(); }).catch(() => {});
+  } catch (e) {}
+}
 
 // ---- 音声再生 (mp3が無ければWebAudioビープにフォールバック) ----
 function beep(freq, dur) {
@@ -265,6 +313,11 @@ function playSound(url, fallbackFreq) {
   if (url) {
     // アンロック済みのsfx要素を使い回す(iOSで new Audio() が鳴らない対策)。失敗時はビープ
     try {
+      // EQ有効ならWeb Audio経由に切替。経由時はAudioContextを起こしておく
+      if (config && config.audio && config.audio.eqEnabled) {
+        ensureEqGraph();
+        if (audioCtx && audioCtx.state === 'suspended') { try { audioCtx.resume(); } catch (e) {} }
+      }
       sfx.src = url;
       sfx.currentTime = 0;
       const p = sfx.play();
@@ -280,6 +333,27 @@ function playSound(url, fallbackFreq) {
 // ---- TTS (読み上げ) ----
 const ttsQueue = [];
 let speaking = false;
+// 端末の音声一覧(男女の声選択に使用)。voiceschangedで更新
+let ttsVoices = [];
+function loadVoices() { try { ttsVoices = window.speechSynthesis ? (speechSynthesis.getVoices() || []) : []; } catch (e) {} }
+loadVoices();
+if (window.speechSynthesis) { try { speechSynthesis.onvoiceschanged = loadVoices; } catch (e) {} }
+// 男女(gender)から最適な声を選ぶ。無ければ言語一致の先頭。名前ヒントで判定
+function pickVoice(lang, gender) {
+  if (!ttsVoices.length) loadVoices();
+  if (!ttsVoices.length) return null;
+  const base = (lang || 'ja-JP').slice(0, 2).toLowerCase();
+  const langV = ttsVoices.filter(v => (v.lang || '').toLowerCase().startsWith(base));
+  const pool = langV.length ? langV : ttsVoices;
+  if (gender === 'male' || gender === 'female') {
+    const hints = gender === 'female'
+      ? ['kyoko', 'o-ren', 'female', 'woman', 'girl', 'samantha', 'haruka', 'nanami', 'sara', 'mizuki']
+      : ['otoya', 'hattori', 'male', 'man', 'daniel', 'ichiro', 'keita', 'takumi'];
+    const m = pool.find(v => hints.some(h => (v.name || '').toLowerCase().includes(h)));
+    if (m) return m;
+  }
+  return pool[0] || null;
+}
 function speak(text) {
   if (!config || !config.tts || !config.tts.enabled) return;
   const max = config.tts.maxLength || 60;
@@ -289,9 +363,17 @@ function speak(text) {
 function processTts() {
   if (speaking || ttsQueue.length === 0) return;
   speaking = true;
+  const t = config.tts || {};
   const u = new SpeechSynthesisUtterance(ttsQueue.shift());
-  u.lang = (config.tts.lang || 'ja-JP');
-  u.rate = config.tts.rate || 1.0;
+  u.lang = (t.lang || 'ja-JP');
+  u.rate = t.rate || 1.0;
+  // 声の高さ: 明示指定があれば優先。無指定なら男=低め/女=高めの目安を自動適用
+  if (t.pitch != null && t.pitch !== '') u.pitch = +t.pitch;
+  else if (t.gender === 'male') u.pitch = 0.7;
+  else if (t.gender === 'female') u.pitch = 1.3;
+  if (t.volume != null && t.volume !== '') u.volume = +t.volume;
+  const v = pickVoice(u.lang, t.gender);
+  if (v) u.voice = v;
   u.onend = u.onerror = () => { speaking = false; processTts(); };
   speechSynthesis.speak(u);
 }

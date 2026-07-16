@@ -133,6 +133,80 @@
   </div>
 
   <div class="panel">
+    <label>読み上げ設定（TTS）</label>
+    <div style="margin-top:12px; display:flex; flex-direction:column; gap:12px">
+      <div class="row" style="gap:18px">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
+          <input type="checkbox" id="ttsEnabled"> 読み上げを使う
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
+          <input type="checkbox" id="ttsReadComments"> コメントを読む
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
+          <input type="checkbox" id="ttsReadGifts"> ギフトを読む
+        </label>
+      </div>
+      <div class="row">
+        <span style="width:96px">声</span>
+        <select id="ttsGender" class="soundsel" style="min-width:160px">
+          <option value="auto">自動</option>
+          <option value="female">女性</option>
+          <option value="male">男性</option>
+        </select>
+        <button class="ghost" onclick="previewTts()">▶ テスト読み上げ</button>
+      </div>
+      <div class="row">
+        <span style="width:96px">高さ</span>
+        <input type="range" id="ttsPitch" min="0.5" max="2" step="0.1" style="width:200px">
+        <span id="ttsPitchVal" class="k" style="color:var(--sub); width:36px"></span>
+      </div>
+      <div class="row">
+        <span style="width:96px">速さ</span>
+        <input type="range" id="ttsRate" min="0.5" max="2" step="0.1" style="width:200px">
+        <span id="ttsRateVal" class="k" style="color:var(--sub); width:36px"></span>
+      </div>
+      <div class="row">
+        <span style="width:96px">音量</span>
+        <input type="range" id="ttsVolume" min="0" max="1" step="0.05" style="width:200px">
+        <span id="ttsVolumeVal" class="k" style="color:var(--sub); width:36px"></span>
+      </div>
+    </div>
+    <div class="hint">「声」で男女が切替できない端末（音声が1種類のみ）でも、「高さ」を上下すれば男女っぽく調整できます。テストは<b>この端末</b>の声で再生します（実際の声はオーバーレイ端末に依存）。</div>
+  </div>
+
+  <div class="panel">
+    <label>サウンド調整（イコライザー）</label>
+    <div style="margin-top:12px; display:flex; flex-direction:column; gap:12px">
+      <div class="row">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
+          <input type="checkbox" id="eqEnabled"> イコライザーを使う
+        </label>
+      </div>
+      <div class="row">
+        <span style="width:96px">低音</span>
+        <input type="range" id="eqLow" min="-12" max="12" step="1" style="width:200px">
+        <span id="eqLowVal" class="k" style="color:var(--sub); width:44px"></span>
+      </div>
+      <div class="row">
+        <span style="width:96px">中音</span>
+        <input type="range" id="eqMid" min="-12" max="12" step="1" style="width:200px">
+        <span id="eqMidVal" class="k" style="color:var(--sub); width:44px"></span>
+      </div>
+      <div class="row">
+        <span style="width:96px">高音</span>
+        <input type="range" id="eqHigh" min="-12" max="12" step="1" style="width:200px">
+        <span id="eqHighVal" class="k" style="color:var(--sub); width:44px"></span>
+      </div>
+      <div class="row">
+        <span style="width:96px">全体音量</span>
+        <input type="range" id="eqVolume" min="0" max="1" step="0.05" style="width:200px">
+        <span id="eqVolumeVal" class="k" style="color:var(--sub); width:44px"></span>
+      </div>
+    </div>
+    <div class="hint">効果音(ギフト音など)の低音・中音・高音と全体音量を調整します。変更は即オーバーレイに反映。iPhone/iPadでは「使う」をONにした時からEQ経由になります。</div>
+  </div>
+
+  <div class="panel">
     <label>ギフト別サウンド（サウンドボード）</label>
 
     <div style="margin-top:12px">
@@ -205,6 +279,8 @@ socket.on('config', c => {
   const ac = document.getElementById('autoConnect');
   if (ac) ac.checked = !!c.autoConnect;
   renderAlertSelects();
+  renderTts();
+  renderEq();
 });
 socket.on('status', s => {
   document.getElementById('badge').className = 'badge ' + (s.connected ? 'on' : 'off');
@@ -283,6 +359,121 @@ function previewAlert(type) {
   else { const item = soundboard.library.find(i => i.id === sel.value); file = item ? item.file : ''; }
   if (!file) { alert('「なし」に設定されています（ビープ音）'); return; }
   new Audio(file).play().catch(() => {});
+}
+
+// ---- config へのパッチ保存 (トップレベルの sub-object 単位で送る=浅いマージ対策) ----
+async function patchConfig(patch) {
+  try {
+    const res = await fetch('/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch)
+    });
+    return res.ok;
+  } catch (e) { return false; }
+}
+
+// ---- 読み上げ設定 (TTS) ----
+let ttsBound = false;
+function renderTts() {
+  const t = appConfig.tts || {};
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+  chk('ttsEnabled', t.enabled);
+  chk('ttsReadComments', t.readComments);
+  chk('ttsReadGifts', t.readGifts);
+  set('ttsGender', t.gender || 'auto');
+  set('ttsPitch', t.pitch != null ? t.pitch : 1);
+  set('ttsRate', t.rate != null ? t.rate : 1.1);
+  set('ttsVolume', t.volume != null ? t.volume : 1);
+  updateTtsLabels();
+  if (!ttsBound) { bindTts(); ttsBound = true; }
+}
+function updateTtsLabels() {
+  const g = (id, o) => { const el = document.getElementById(id), ov = document.getElementById(o); if (el && ov) ov.textContent = el.value; };
+  g('ttsPitch', 'ttsPitchVal'); g('ttsRate', 'ttsRateVal'); g('ttsVolume', 'ttsVolumeVal');
+}
+function currentTts() {
+  return {
+    ...(appConfig.tts || {}),
+    enabled: document.getElementById('ttsEnabled').checked,
+    readComments: document.getElementById('ttsReadComments').checked,
+    readGifts: document.getElementById('ttsReadGifts').checked,
+    gender: document.getElementById('ttsGender').value,
+    pitch: parseFloat(document.getElementById('ttsPitch').value),
+    rate: parseFloat(document.getElementById('ttsRate').value),
+    volume: parseFloat(document.getElementById('ttsVolume').value)
+  };
+}
+function saveTts() { const tts = currentTts(); appConfig.tts = tts; patchConfig({ tts }); }
+function bindTts() {
+  ['ttsEnabled', 'ttsReadComments', 'ttsReadGifts', 'ttsGender'].forEach(id =>
+    document.getElementById(id).addEventListener('change', saveTts));
+  ['ttsPitch', 'ttsRate', 'ttsVolume'].forEach(id => {
+    const el = document.getElementById(id);
+    el.addEventListener('input', updateTtsLabels);
+    el.addEventListener('change', saveTts); // 離した時に保存(スライダー連打で叩きすぎない)
+  });
+}
+function previewTts() {
+  const t = currentTts();
+  try {
+    const u = new SpeechSynthesisUtterance('テスト読み上げです。ギフトありがとう!');
+    u.lang = t.lang || 'ja-JP';
+    u.rate = t.rate || 1.0;
+    u.pitch = t.pitch != null ? t.pitch : (t.gender === 'male' ? 0.7 : t.gender === 'female' ? 1.3 : 1.0);
+    u.volume = t.volume != null ? t.volume : 1;
+    const voices = speechSynthesis.getVoices() || [];
+    const ja = voices.filter(v => (v.lang || '').toLowerCase().startsWith('ja'));
+    const pool = ja.length ? ja : voices;
+    if (t.gender === 'male' || t.gender === 'female') {
+      const hints = t.gender === 'female' ? ['kyoko', 'female', 'woman', 'o-ren', 'haruka'] : ['otoya', 'male', 'man', 'hattori', 'daniel'];
+      const m = pool.find(v => hints.some(h => (v.name || '').toLowerCase().includes(h)));
+      if (m) u.voice = m;
+    }
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  } catch (e) { alert('この端末は読み上げに対応していません'); }
+}
+
+// ---- サウンド調整 (イコライザー) ----
+let eqBound = false;
+function renderEq() {
+  const a = appConfig.audio || {};
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  document.getElementById('eqEnabled').checked = !!a.eqEnabled;
+  set('eqLow', a.eqLow != null ? a.eqLow : 0);
+  set('eqMid', a.eqMid != null ? a.eqMid : 0);
+  set('eqHigh', a.eqHigh != null ? a.eqHigh : 0);
+  set('eqVolume', a.volume != null ? a.volume : 1);
+  updateEqLabels();
+  if (!eqBound) { bindEq(); eqBound = true; }
+}
+function updateEqLabels() {
+  const fmt = (id, o, db) => {
+    const el = document.getElementById(id), ov = document.getElementById(o);
+    if (el && ov) ov.textContent = db ? (el.value > 0 ? '+' : '') + el.value + 'dB' : el.value;
+  };
+  fmt('eqLow', 'eqLowVal', true); fmt('eqMid', 'eqMidVal', true);
+  fmt('eqHigh', 'eqHighVal', true); fmt('eqVolume', 'eqVolumeVal', false);
+}
+function currentAudio() {
+  return {
+    ...(appConfig.audio || {}),
+    eqEnabled: document.getElementById('eqEnabled').checked,
+    eqLow: parseFloat(document.getElementById('eqLow').value),
+    eqMid: parseFloat(document.getElementById('eqMid').value),
+    eqHigh: parseFloat(document.getElementById('eqHigh').value),
+    volume: parseFloat(document.getElementById('eqVolume').value)
+  };
+}
+function saveAudio() { const audio = currentAudio(); appConfig.audio = audio; patchConfig({ audio }); }
+function bindEq() {
+  document.getElementById('eqEnabled').addEventListener('change', saveAudio);
+  ['eqLow', 'eqMid', 'eqHigh', 'eqVolume'].forEach(id => {
+    const el = document.getElementById(id);
+    el.addEventListener('input', updateEqLabels);
+    el.addEventListener('change', saveAudio);
+  });
 }
 
 // ---- サウンドボード（ギフト別サウンド）----

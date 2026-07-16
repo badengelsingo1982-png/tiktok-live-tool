@@ -201,6 +201,10 @@ const libUpload = multer({
     fileFilter: audioFilter
 });
 
+// 起動ごとに変わるビルドID。オーバーレイはこの変化を検知して自動リロードする
+// (デプロイ時に pm2 restart → 新IDになり、開いている端末が自動で最新版に更新される)
+const BUILD_ID = crypto.randomBytes(6).toString('hex');
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
@@ -221,6 +225,7 @@ function serveDashboard(req, res) {
     let html = fs.readFileSync(path.join(__dirname, 'public', 'dashboard.html'), 'utf8');
     html = html.replace('</head>',
         `<script>window.__ADMIN_TOKEN__=${JSON.stringify(ADMIN_TOKEN || '')};</script>\n</head>`);
+    res.set('Cache-Control', 'no-store'); // 常に最新HTMLを配信(キャッシュ由来の古い動作を防ぐ)
     res.type('html').send(html);
 }
 app.get('/dashboard', basicAuth, serveDashboard);
@@ -229,7 +234,10 @@ app.get('/dashboard.html', basicAuth, serveDashboard);
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/sounds', express.static(path.join(__dirname, 'sounds')));
 
-app.get('/overlay', (req, res) => res.sendFile(path.join(__dirname, 'public', 'overlay.html')));
+app.get('/overlay', (req, res) => {
+    res.set('Cache-Control', 'no-store'); // 常に最新HTMLを配信
+    res.sendFile(path.join(__dirname, 'public', 'overlay.html'));
+});
 app.get('/config', (req, res) => res.json(config));
 app.post('/config', basicAuth, (req, res) => {
     config = { ...config, ...req.body };
@@ -604,6 +612,7 @@ io.use((socket, next) => {
 
 // ---- ダッシュボードからの操作 ----
 io.on('connection', socket => {
+    socket.emit('buildId', BUILD_ID);
     socket.emit('status', status);
     socket.emit('config', config);
     socket.emit('soundboard', soundboard);
