@@ -121,6 +121,48 @@ const SILENT_WAV = 'data:audio/wav;base64,UklGRuwAAABXQVZFZm10IBAAAAABAAEAQB8AAE
 // mp3再生用の使い回しAudio要素(iOSはこの1要素をジェスチャ内でアンロックすれば以降再生可能)
 const sfx = new Audio();
 sfx.preload = 'auto';
+
+// ---- バックグラウンド維持: 無音ループを常時再生してオーディオセッションを生かす ----
+// iOS/スマホのブラウザはバックグラウンドのタブを数分でサスペンドし、AudioContext/TTSが
+// 止まる。無音を再生し続けると「音を出しているタブ」扱いになり停止しにくくなる。
+function makeSilentWavUrl(seconds) {
+  const sr = 8000, n = sr * seconds, buf = new ArrayBuffer(44 + n), dv = new DataView(buf);
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, 'RIFF'); dv.setUint32(4, 36 + n, true); wr(8, 'WAVE');
+  wr(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, sr, true); dv.setUint32(28, sr, true); dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
+  wr(36, 'data'); dv.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) dv.setUint8(44 + i, 128); // 128 = 8bit無音
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+let keepAlive = null;
+function startKeepAlive() {
+  try {
+    if (!keepAlive) {
+      keepAlive = new Audio(makeSilentWavUrl(1));
+      keepAlive.loop = true;
+    }
+    if (keepAlive.paused) {
+      const p = keepAlive.play();
+      if (p && p.catch) p.catch(() => {});
+    }
+  } catch (e) {}
+}
+// タブ復帰・フォーカス時にオーディオを立て直す
+function resumeAudio() {
+  ensureAudioCtx();
+  try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (e) {}
+  startKeepAlive();
+  try { if (window.speechSynthesis && speechSynthesis.paused) speechSynthesis.resume(); } catch (e) {}
+}
+if (!isOBS) {
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) resumeAudio(); });
+  window.addEventListener('focus', resumeAudio);
+  window.addEventListener('pageshow', resumeAudio);
+  // 定期ハートビート(前面時は毎回、背面でも復帰時に効く)
+  setInterval(resumeAudio, 20000);
+}
+
 function ensureAudioCtx() {
   if (!audioCtx) {
     try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
@@ -151,6 +193,8 @@ function unlockAudio() {
       warm.volume = 0; speechSynthesis.speak(warm);
     }
   } catch (e) {}
+  // 無音ループ開始(バックグラウンドでもオーディオセッションを維持)
+  startKeepAlive();
   audioUnlocked = true;
   const t = document.getElementById('tapToStart');
   if (t) t.style.display = 'none';
