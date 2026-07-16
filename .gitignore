@@ -7,6 +7,7 @@ npm-debug.log*
 
 # 実行時に生成/アップロードされるデータ（サーバーごとに固有。Git管理しない）
 soundboard.json
+gift-catalog.json
 sounds/*.mp3
 sounds/lib/
 public/icons/

@@ -37,6 +37,57 @@ function saveSoundboard() {
     fs.writeFileSync(SOUNDBOARD_PATH, JSON.stringify(soundboard, null, 2));
 }
 
+// ---- ギフトカタログ: 音の割当をプルダウンで選べるよう、ギフト名を蓄積 ----
+// gift-catalog.json 例: [{ "name": "Rose", "image": "https://..." }, ...]
+// 定番ギフトで初期化し、実際に受信したギフト名で自動的に育てる（手入力の打ち間違い=音が鳴らない、を防ぐ）
+const GIFT_CATALOG_PATH = path.join(__dirname, 'gift-catalog.json');
+const DEFAULT_GIFTS = [
+    'Rose', 'TikTok', 'Heart', 'Heart Me', 'GG', 'Ice Cream Cone', 'Finger Heart',
+    'Perfume', 'Doughnut', 'Rosa', 'Love you', 'Hand Hearts', 'Sunglasses', 'Hi',
+    'Cheer You Up', 'Team Bracelet', 'Football', 'Music Play', 'Gamepad', 'Lion',
+    'Universe', 'Rocket', 'Whale diving', 'Galaxy', 'Corgi', 'Confetti', 'Star',
+    'Diamond', 'Coral', 'Falcon', 'Sports Car', 'Dragon', 'Interstellar',
+    'Motorcycle', 'Private Jet', 'Yacht'
+];
+let giftCatalog = [];
+try {
+    const gc = JSON.parse(fs.readFileSync(GIFT_CATALOG_PATH, 'utf8'));
+    if (Array.isArray(gc)) giftCatalog = gc;
+} catch (e) {}
+function saveGiftCatalog() {
+    try { fs.writeFileSync(GIFT_CATALOG_PATH, JSON.stringify(giftCatalog, null, 2)); } catch (e) {}
+}
+// 既定ギフト名で不足分を補完（既存を消さない）
+(function seedGiftCatalog() {
+    const have = new Set(giftCatalog.map(g => (g.name || '').toLowerCase()));
+    let added = false;
+    for (const name of DEFAULT_GIFTS) {
+        if (!have.has(name.toLowerCase())) {
+            giftCatalog.push({ name, image: '' });
+            have.add(name.toLowerCase());
+            added = true;
+        }
+    }
+    if (added) saveGiftCatalog();
+})();
+// 受信したギフトをカタログに記録（新規なら追加、画像が無ければ補完）
+function rememberGift(name, image) {
+    name = (name || '').toString().trim();
+    if (!name) return;
+    const existing = giftCatalog.find(g => (g.name || '').toLowerCase() === name.toLowerCase());
+    if (existing) {
+        if (image && !existing.image) {
+            existing.image = image;
+            saveGiftCatalog();
+            io.emit('giftCatalog', giftCatalog);
+        }
+        return;
+    }
+    giftCatalog.push({ name, image: image || '' });
+    saveGiftCatalog();
+    io.emit('giftCatalog', giftCatalog);
+}
+
 // ---- 管理画面の認証 (auth.json があれば有効化) ----
 // auth.json 例: { "user": "admin", "pass": "秘密のパスワード" }
 // ※ auth.json は /config で配信されないので資格情報は漏れません
@@ -249,6 +300,9 @@ app.post('/set-sound/:type', basicAuth, (req, res) => {
 // 現在の内容 (overlayも使うので公開)
 app.get('/soundboard', (req, res) => res.json(soundboard));
 
+// ギフトカタログ (割当プルダウン用)
+app.get('/gift-catalog', basicAuth, (req, res) => res.json(giftCatalog));
+
 // ライブラリに音を追加 (name + sound ファイル)
 app.post('/soundboard/upload', basicAuth, (req, res) => {
     req._soundId = crypto.randomBytes(6).toString('hex');
@@ -429,8 +483,10 @@ async function connectTikTok(username) {
     // --- コメント ---
     connection.on(WebcastEvent.CHAT, data => {
         const u = userInfo(data.user);
-        console.log(`[コメント] ${u.nickname}: ${data.comment}`);
-        broadcast('chat', { ...u, comment: data.comment });
+        // v2protoでは comment だが v3proto では content。両対応でundefined回避
+        const comment = data.comment ?? data.content ?? '';
+        console.log(`[コメント] ${u.nickname}: ${comment}`);
+        broadcast('chat', { ...u, comment });
     });
 
     // --- ギフト ---
@@ -445,11 +501,13 @@ async function connectTikTok(username) {
         const diamonds = (g.diamondCount || 0) * count;
         status.diamonds += diamonds;
 
+        const giftImage = (g.image && g.image.urlList && g.image.urlList[0]) || '';
         console.log(`[ギフト] ${u.nickname} → ${g.name} x${count} (${diamonds}💎)`);
+        rememberGift(g.name, giftImage);
         broadcast('gift', {
             ...u,
             giftName: g.name || 'ギフト',
-            giftImage: (g.image && g.image.urlList && g.image.urlList[0]) || '',
+            giftImage,
             count,
             diamonds
         });
@@ -549,6 +607,7 @@ io.on('connection', socket => {
     socket.emit('status', status);
     socket.emit('config', config);
     socket.emit('soundboard', soundboard);
+    socket.emit('giftCatalog', giftCatalog);
 
     socket.on('connectLive', username => {
         if (!socket.isAdmin) return; // 認証済み管理者のみ

@@ -146,13 +146,13 @@
     <div style="margin-top:16px">
       <div class="k" style="color:var(--sub); margin-bottom:6px">② ギフトにサウンドを割り当て</div>
       <div class="row">
-        <input type="text" id="ruleGift" placeholder="ギフト名（例：Rose）" list="giftNames" style="width:180px">
-        <datalist id="giftNames"></datalist>
+        <select id="ruleGift" class="soundsel" style="min-width:180px"></select>
+        <span style="color:var(--sub)">→</span>
         <select id="ruleSound" style="background:#0a0d13; border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:10px 12px"></select>
         <button onclick="addRule()">割当</button>
       </div>
       <div id="ruleList" style="margin-top:10px; display:flex; flex-direction:column; gap:6px"></div>
-      <div class="hint">ギフト名は届いたギフトから自動で候補表示されます。割当が無いギフトは既定のギフト音が鳴ります。</div>
+      <div class="hint">ギフトは一覧から選択します（定番ギフト＋実際に届いたギフトを自動追加）。割当が無いギフトは既定のギフト音が鳴ります。</div>
     </div>
   </div>
 
@@ -287,21 +287,36 @@ function previewAlert(type) {
 
 // ---- サウンドボード（ギフト別サウンド）----
 let soundboard = { library: [], giftRules: [] };
+let giftCatalog = [];
 const seenGifts = new Set();
 
-socket.on('soundboard', sb => { if (sb) { soundboard = sb; renderSoundboard(); renderAlertSelects(); } });
+socket.on('soundboard', sb => { if (sb) { soundboard = sb; renderSoundboard(); renderAlertSelects(); renderGiftOptions(); } });
 
-// 届いたギフト名を候補に蓄積
+// サーバーから届くギフトカタログ（定番＋受信済み）
+socket.on('giftCatalog', gc => { if (Array.isArray(gc)) { giftCatalog = gc; renderGiftOptions(); } });
+
+// 届いたギフト名を即候補に反映
 socket.on('event', ev => {
   if (ev.type === 'gift' && ev.giftName && !seenGifts.has(ev.giftName)) {
     seenGifts.add(ev.giftName);
-    renderGiftNames();
+    renderGiftOptions();
   }
 });
 
-function renderGiftNames() {
-  const dl = document.getElementById('giftNames');
-  dl.innerHTML = [...seenGifts].map(g => `<option value="${esc(g)}">`).join('');
+// ギフト割当プルダウンを再構築（カタログ＋割当済み＋今セッションで受信を統合）
+function renderGiftOptions() {
+  const sel = document.getElementById('ruleGift');
+  if (!sel) return;
+  const cur = sel.value;
+  const names = new Set();
+  giftCatalog.forEach(g => { if (g && g.name) names.add(g.name); });
+  soundboard.giftRules.forEach(r => { if (r.gift) names.add(r.gift); });
+  seenGifts.forEach(g => names.add(g));
+  const sorted = [...names].filter(Boolean).sort((a, b) => a.localeCompare(b, 'ja'));
+  sel.innerHTML = sorted.length
+    ? sorted.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')
+    : '<option value="">(ギフト履歴なし)</option>';
+  if (cur && sorted.includes(cur)) sel.value = cur;
 }
 
 function renderSoundboard() {
@@ -453,8 +468,7 @@ async function addRule() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ gift, soundId })
     });
-    if (res.ok) document.getElementById('ruleGift').value = '';
-    else alert('割当失敗');
+    if (!res.ok) alert('割当失敗');
   } catch (e) { alert('通信エラー: ' + e.message); }
 }
 async function removeRule(gift) {
