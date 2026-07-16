@@ -158,12 +158,23 @@ function startKeepAlive() {
     setupMediaSession();
   } catch (e) {}
 }
+// 画面スリープ防止(2台目端末をサウンドボードとして使う運用向け)
+let wakeLock = null;
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator && !wakeLock && !document.hidden) {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    }
+  } catch (e) {}
+}
 // タブ復帰・フォーカス時にオーディオを立て直す
 function resumeAudio() {
   ensureAudioCtx();
   try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (e) {}
   startKeepAlive();
   try { if (window.speechSynthesis && speechSynthesis.paused) speechSynthesis.resume(); } catch (e) {}
+  requestWakeLock();
 }
 if (!isOBS) {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) resumeAudio(); });
@@ -205,6 +216,8 @@ function unlockAudio() {
   } catch (e) {}
   // 無音ループ開始(バックグラウンドでもオーディオセッションを維持)
   startKeepAlive();
+  // 画面スリープ防止(2台目端末運用向け)
+  requestWakeLock();
   audioUnlocked = true;
   const t = document.getElementById('tapToStart');
   if (t) t.style.display = 'none';
