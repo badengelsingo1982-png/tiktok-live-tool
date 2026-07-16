@@ -25,6 +25,20 @@
   h1 { font-size: 20px; font-weight: 700; letter-spacing: 0.04em; margin-bottom: 20px; }
   h1 .dot { color: var(--accent); }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  /* ---- アコーディオン (details/summary) ---- */
+  details.panel { padding: 0; overflow: hidden; }
+  details.panel > summary {
+    list-style: none; cursor: pointer; padding: 16px 20px;
+    font-size: 15px; font-weight: 700; color: var(--txt);
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  details.panel > summary::-webkit-details-marker { display: none; }
+  details.panel > summary::after { content: '▸'; color: var(--sub); font-size: 13px; transition: transform .2s; }
+  details.panel[open] > summary::after { transform: rotate(90deg); }
+  details.panel > summary:hover { background: rgba(255,255,255,0.03); }
+  details.panel > summary + * { margin: 0 20px; }
+  details.panel > :last-child { margin-bottom: 20px; }
+  details.panel > summary .sub { font-weight: 400; font-size: 12px; color: var(--sub); }
   .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
   label { font-size: 13px; color: var(--sub); }
   input[type=text] {
@@ -76,7 +90,8 @@
 <body>
   <h1>TikTok LIVE ツール <span class="dot">●</span> 管理画面</h1>
 
-  <div class="panel">
+  <details class="panel" open>
+    <summary>接続・ステータス</summary>
     <div class="row">
       <label>TikTokユーザー名</label>
       <input type="text" id="username" placeholder="@なしで入力">
@@ -94,11 +109,11 @@
       <div class="stat"><div class="v" id="stLikes">0</div><div class="k">いいね</div></div>
       <div class="stat"><div class="v" id="stDiamonds">0</div><div class="k">ダイヤ(累計)</div></div>
     </div>
-  </div>
+  </details>
 
-  <div class="panel">
+  <details class="panel">
+    <summary>オーバーレイ動作テスト</summary>
     <div class="row">
-      <label>オーバーレイ動作テスト</label>
       <button class="ghost" onclick="test('gift')">🎁 ギフト</button>
       <button class="ghost" onclick="test('chat')">💬 コメント</button>
       <button class="ghost" onclick="test('follow')">➕ フォロー</button>
@@ -108,10 +123,10 @@
       OBS / TikTok LIVE Studio のブラウザソースに <code id="overlayUrl">http://localhost:8181/overlay</code> を登録してください(幅1920 x 高さ1080推奨)。<br>
       音声ファイルは下の「効果音アップロード」から設定できます(未設定の種類はビープ音)。
     </div>
-  </div>
+  </details>
 
-  <div class="panel">
-    <label>アラート効果音（サウンドライブラリから選択）</label>
+  <details class="panel">
+    <summary>アラート効果音 <span class="sub">サウンドライブラリから選択</span></summary>
     <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px">
       <div class="row">
         <span style="width:96px">🎁 ギフト</span>
@@ -130,10 +145,10 @@
       </div>
     </div>
     <div class="hint">下の「ギフト別サウンド」①ライブラリに追加した音から選べます（myinstantsやファイルから登録）。「なし」でビープ音。変更は即反映（オーバーレイ再読み込み不要）。</div>
-  </div>
+  </details>
 
-  <div class="panel">
-    <label>読み上げ設定（TTS）</label>
+  <details class="panel">
+    <summary>読み上げ設定 <span class="sub">TTS</span></summary>
     <div style="margin-top:12px; display:flex; flex-direction:column; gap:12px">
       <div class="row" style="gap:18px">
         <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
@@ -172,10 +187,10 @@
       </div>
     </div>
     <div class="hint">「声」で男女が切替できない端末（音声が1種類のみ）でも、「高さ」を上下すれば男女っぽく調整できます。テストは<b>この端末</b>の声で再生します（実際の声はオーバーレイ端末に依存）。</div>
-  </div>
+  </details>
 
-  <div class="panel">
-    <label>サウンド調整（イコライザー）</label>
+  <details class="panel">
+    <summary>サウンド調整 <span class="sub">イコライザー</span></summary>
     <div style="margin-top:12px; display:flex; flex-direction:column; gap:12px">
       <div class="row">
         <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
@@ -204,10 +219,10 @@
       </div>
     </div>
     <div class="hint">効果音(ギフト音など)の低音・中音・高音と全体音量を調整します。変更は即オーバーレイに反映。iPhone/iPadでは「使う」をONにした時からEQ経由になります。</div>
-  </div>
+  </details>
 
-  <div class="panel">
-    <label>ギフト別サウンド（サウンドボード）</label>
+  <details class="panel">
+    <summary>ギフト別サウンド <span class="sub">サウンドボード</span></summary>
 
     <div style="margin-top:12px">
       <div class="row" style="justify-content:space-between">
@@ -228,12 +243,12 @@
       <div id="ruleList" style="margin-top:10px; display:flex; flex-direction:column; gap:6px"></div>
       <div class="hint">ギフトは一覧から選択します（定番ギフト＋実際に届いたギフトを自動追加）。割当が無いギフトは既定のギフト音が鳴ります。</div>
     </div>
-  </div>
+  </details>
 
-  <div class="panel">
-    <label>イベントログ</label>
+  <details class="panel" open>
+    <summary>イベントログ</summary>
     <div id="log" style="margin-top:10px"></div>
-  </div>
+  </details>
 
   <!-- サウンド追加ポップアップ -->
   <div class="modal-overlay" id="libModal">
