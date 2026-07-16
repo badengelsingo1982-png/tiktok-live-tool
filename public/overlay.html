@@ -57,6 +57,19 @@
     font-size: 20px; font-weight: 700;
   }
   #likes .heart { color: #ff2d55; }
+
+  /* ---- 音声有効化プロンプト (iPad/スマホのブラウザ用。OBSでは表示されない) ---- */
+  #tapToStart {
+    position: absolute; inset: 0; z-index: 9999;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, 0.55); cursor: pointer;
+  }
+  #tapToStart .box {
+    padding: 26px 44px; border-radius: 18px;
+    background: rgba(15, 15, 25, 0.9); border: 2px solid #ff2d55;
+    color: #fff; font-size: 26px; font-weight: 800; text-align: center; line-height: 1.5;
+    box-shadow: 0 0 30px rgba(255, 45, 85, 0.5);
+  }
 </style>
 </head>
 <body>
@@ -71,6 +84,8 @@
 
   <div id="chat"></div>
   <div id="likes"><span class="heart">&#10084;</span> <span id="likeCount">0</span></div>
+
+  <div id="tapToStart"><div class="box">🔊 画面をタップして<br>音声を有効化</div></div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
@@ -95,11 +110,58 @@ socket.on('status', s => {
   document.getElementById('likeCount').textContent = (s.likes || 0).toLocaleString();
 });
 
-// ---- 音声再生 (mp3が無ければWebAudioビープにフォールバック) ----
+// ---- 音声アンロック (iPad/iOS/スマホのブラウザ対策) ----
+// iOSのSafari/Chromeはユーザー操作なしに音を鳴らせない。
+// OBSブラウザソースでは window.obsstudio が存在するので自動許可扱いにする。
 let audioCtx = null;
+let audioUnlocked = false;
+const isOBS = !!window.obsstudio;
+function ensureAudioCtx() {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+  return audioCtx;
+}
+function unlockAudio() {
+  ensureAudioCtx();
+  try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (e) {}
+  // 無音を1発鳴らして再生権限を獲得
+  try {
+    if (audioCtx) {
+      const b = audioCtx.createBuffer(1, 1, 22050);
+      const src = audioCtx.createBufferSource();
+      src.buffer = b; src.connect(audioCtx.destination); src.start(0);
+    }
+  } catch (e) {}
+  // TTS(speechSynthesis)も無音発話でウォームアップ
+  try {
+    if (window.speechSynthesis) {
+      const warm = new SpeechSynthesisUtterance('');
+      warm.volume = 0; speechSynthesis.speak(warm);
+    }
+  } catch (e) {}
+  audioUnlocked = true;
+  const t = document.getElementById('tapToStart');
+  if (t) t.style.display = 'none';
+}
+// OBS以外(iPad等の実ブラウザ)ではタップ待ちオーバーレイを即表示
+const tapEl = document.getElementById('tapToStart');
+if (isOBS) {
+  audioUnlocked = true;
+} else if (tapEl) {
+  tapEl.style.display = 'flex';
+  tapEl.addEventListener('click', unlockAudio);
+}
+['click', 'touchend', 'keydown'].forEach(evt =>
+  window.addEventListener(evt, () => { if (!audioUnlocked) unlockAudio(); }, { passive: true })
+);
+
+// ---- 音声再生 (mp3が無ければWebAudioビープにフォールバック) ----
 function beep(freq, dur) {
   try {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    ensureAudioCtx();
+    if (audioCtx && audioCtx.state === 'suspended') { try { audioCtx.resume(); } catch (e) {} }
+    if (!audioCtx) return;
     const o = audioCtx.createOscillator();
     const g = audioCtx.createGain();
     o.connect(g); g.connect(audioCtx.destination);
