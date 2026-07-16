@@ -136,6 +136,15 @@ function makeSilentWavUrl(seconds) {
   return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
 }
 let keepAlive = null;
+// OSに「メディア再生中」と認識させ、背面でも音を止められにくくする(iPad Split View等で有効)
+function setupMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata({ title: 'LIVEオーバーレイ', artist: '配信ツール' });
+    navigator.mediaSession.playbackState = 'playing';
+    ['play', 'pause'].forEach(a => { try { navigator.mediaSession.setActionHandler(a, () => {}); } catch (e) {} });
+  } catch (e) {}
+}
 function startKeepAlive() {
   try {
     if (!keepAlive) {
@@ -146,6 +155,7 @@ function startKeepAlive() {
       const p = keepAlive.play();
       if (p && p.catch) p.catch(() => {});
     }
+    setupMediaSession();
   } catch (e) {}
 }
 // タブ復帰・フォーカス時にオーディオを立て直す
