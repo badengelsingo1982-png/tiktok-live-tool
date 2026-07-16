@@ -97,9 +97,18 @@
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-const socket = io();
+// ?u=<ユーザー名> でそのユーザーのイベントを購読 (マルチユーザー)
+const overlayUser = new URLSearchParams(location.search).get('u') || '';
+const socket = overlayUser ? io({ auth: { overlay: overlayUser } }) : io();
 let config = null;
 socket.on('config', c => { config = c; applyEq(); });
+// ユーザー未指定なら注意表示(OBSにURLを?u=付きで登録する必要がある)
+if (!overlayUser && !window.obsstudio) {
+  window.addEventListener('DOMContentLoaded', () => {
+    const el = document.getElementById('chat');
+    if (el) el.innerHTML = '<div class="msg event"><div class="noavatar"></div><div><div class="name">設定</div><div class="body">URLに ?u=ユーザー名 を付けてください（ダッシュボードのオーバーレイURLを使用）</div></div></div>';
+  });
+}
 
 // ---- 自動リロード: サーバーのビルドIDが変わったら(=更新デプロイ)自動で最新版に ----
 let myBuildId = null;

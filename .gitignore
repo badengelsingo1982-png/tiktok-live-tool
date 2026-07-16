@@ -11,3 +11,8 @@ gift-catalog.json
 sounds/*.mp3
 sounds/lib/
 public/icons/
+
+# マルチユーザー版の実行時データ
+users.json
+session-secret
+data/

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>ログイン | TikTok LIVE ツール</title>
+<style>
+  :root { --bg:#0d1017; --panel:#161b26; --line:#262d3d; --txt:#e8eaf0; --sub:#8b93a7; --accent:#ff2d55; }
+  * { box-sizing:border-box; margin:0; font-family:"Hiragino Sans","Noto Sans JP",sans-serif; }
+  body { background:var(--bg); color:var(--txt); min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:32px; width:100%; max-width:360px; }
+  h1 { font-size:18px; font-weight:700; margin-bottom:4px; }
+  h1 .dot { color:var(--accent); }
+  .sub { font-size:12px; color:var(--sub); margin-bottom:24px; }
+  label { font-size:12px; color:var(--sub); display:block; margin-bottom:6px; }
+  input { width:100%; background:#0a0d13; border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:12px 14px; font-size:16px; margin-bottom:16px; }
+  button { width:100%; background:var(--accent); color:#fff; border:none; border-radius:8px; padding:13px; font-size:15px; font-weight:700; cursor:pointer; }
+  button:hover { opacity:.9; }
+  button:disabled { opacity:.5; cursor:default; }
+  .err { color:var(--accent); font-size:13px; min-height:18px; margin-bottom:12px; }
+  .hint { font-size:11px; color:var(--sub); margin-top:16px; line-height:1.6; }
+</style>
+</head>
+<body>
+  <form class="card" id="loginForm">
+    <h1>TikTok LIVE ツール <span class="dot">●</span></h1>
+    <div class="sub">アカウントでログイン</div>
+    <label>TikTokユーザー名</label>
+    <input type="text" id="username" autocomplete="username" placeholder="@なしで入力" autocapitalize="off" autocorrect="off">
+    <label>パスワード</label>
+    <input type="password" id="password" autocomplete="current-password" placeholder="パスワード">
+    <div class="err" id="err"></div>
+    <button type="submit" id="btn">ログイン</button>
+    <div class="hint">アカウントは管理者が発行します。ログインできない場合は管理者にお問い合わせください。</div>
+  </form>
+<script>
+const form = document.getElementById('loginForm');
+const err = document.getElementById('err');
+const btn = document.getElementById('btn');
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  err.textContent = '';
+  btn.disabled = true;
+  try {
+    const res = await fetch('/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: document.getElementById('username').value.trim(),
+        password: document.getElementById('password').value
+      })
+    });
+    const j = await res.json().catch(() => ({}));
+    if (res.ok) { location.href = '/dashboard'; return; }
+    err.textContent = j.error || 'ログインに失敗しました';
+  } catch (e2) { err.textContent = '通信エラー: ' + e2.message; }
+  finally { btn.disabled = false; }
+});
+</script>
+</body>
+</html>

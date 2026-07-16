@@ -88,7 +88,13 @@
 </style>
 </head>
 <body>
-  <h1>TikTok LIVE ツール <span class="dot">●</span> 管理画面</h1>
+  <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:20px; flex-wrap:wrap">
+    <h1 style="margin:0">TikTok LIVE ツール <span class="dot">●</span> 管理画面</h1>
+    <div class="row" style="gap:10px">
+      <span class="k" style="color:var(--sub)">👤 <b id="whoami" style="color:var(--txt)"></b></span>
+      <button class="ghost" id="btnLogout">ログアウト</button>
+    </div>
+  </div>
 
   <details class="panel" open>
     <summary>接続・ステータス</summary>
@@ -245,6 +251,22 @@
     </div>
   </details>
 
+  <details class="panel" id="adminPanel" style="display:none">
+    <summary>ユーザー管理 <span class="sub">管理者のみ</span></summary>
+    <div style="margin-top:12px">
+      <div class="k" style="color:var(--sub); margin-bottom:6px">アカウントを追加</div>
+      <div class="row">
+        <input type="text" id="newUserName" placeholder="TikTokユーザー名" style="width:200px" autocapitalize="off">
+        <input type="text" id="newUserPass" placeholder="パスワード(4文字以上)" style="width:200px">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
+          <input type="checkbox" id="newUserAdmin"> 管理者
+        </label>
+        <button onclick="createUser()">作成</button>
+      </div>
+      <div id="userList" style="margin-top:14px; display:flex; flex-direction:column; gap:6px"></div>
+    </div>
+  </details>
+
   <details class="panel" open>
     <summary>イベントログ</summary>
     <div id="log" style="margin-top:10px"></div>
@@ -283,9 +305,99 @@
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
-// 管理socketは注入されたトークンで認証 (これが無いと接続/切断/テストは拒否される)
-const socket = io({ auth: { token: window.__ADMIN_TOKEN__ || '' } });
-document.getElementById('overlayUrl').textContent = location.origin + '/overlay';
+// ログイン中ユーザー (サーバーが注入)。socketはCookieセッションで自動認証される
+const session = window.__SESSION__ || {};
+const socket = io();
+document.getElementById('whoami').textContent = session.username || '';
+document.getElementById('overlayUrl').textContent = location.origin + '/overlay?u=' + encodeURIComponent(session.key || '');
+document.getElementById('btnLogout').onclick = async () => {
+  try { await fetch('/logout', { method: 'POST' }); } catch (e) {}
+  location.href = '/login';
+};
+// 管理者ならユーザー管理パネルを表示
+if (session.isAdmin) {
+  document.getElementById('adminPanel').style.display = '';
+  loadUsers();
+}
+
+// 更新デプロイ時に自動リロード(サーバーのビルドID変化を検知)
+let myBuildId = null;
+socket.on('buildId', id => {
+  if (myBuildId && id && id !== myBuildId) { location.reload(); return; }
+  myBuildId = id;
+});
+
+// ---- ユーザー管理 (管理者) ----
+async function loadUsers() {
+  try {
+    const res = await fetch('/admin/users');
+    if (!res.ok) return;
+    const j = await res.json();
+    const box = document.getElementById('userList');
+    box.innerHTML = '';
+    (j.users || []).sort((a, b) => a.username.localeCompare(b.username)).forEach(u => {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.style.justifyContent = 'space-between';
+      const label = u.username + (u.isAdmin ? '（管理者）' : '') + (u.key === session.key ? '（あなた）' : '');
+      row.innerHTML = `<span style="min-width:180px">👤 <b>${esc(u.username)}</b> <span class="k" style="color:var(--sub)">${u.isAdmin ? '管理者' : ''}</span></span>`;
+      const overlay = document.createElement('button'); overlay.className = 'ghost'; overlay.textContent = 'オーバーレイURL';
+      overlay.onclick = () => {
+        const url = location.origin + '/overlay?u=' + encodeURIComponent(u.key);
+        navigator.clipboard && navigator.clipboard.writeText(url).catch(() => {});
+        prompt('このユーザーのオーバーレイURL（コピーしてOBS等に登録）', url);
+      };
+      const pass = document.createElement('button'); pass.className = 'ghost'; pass.textContent = 'PW変更';
+      pass.onclick = () => resetPassword(u.key, u.username);
+      row.appendChild(overlay); row.appendChild(pass);
+      if (u.key !== session.key) {
+        const del = document.createElement('button'); del.className = 'ghost'; del.textContent = '削除';
+        del.onclick = () => deleteUser(u.key, u.username);
+        row.appendChild(del);
+      }
+      box.appendChild(row);
+    });
+  } catch (e) {}
+}
+async function createUser() {
+  const username = document.getElementById('newUserName').value.trim();
+  const password = document.getElementById('newUserPass').value;
+  const isAdmin = document.getElementById('newUserAdmin').checked;
+  if (!username || !password) { alert('ユーザー名とパスワードを入力してください'); return; }
+  try {
+    const res = await fetch('/admin/users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, isAdmin })
+    });
+    const j = await res.json().catch(() => ({}));
+    if (res.ok) {
+      document.getElementById('newUserName').value = '';
+      document.getElementById('newUserPass').value = '';
+      document.getElementById('newUserAdmin').checked = false;
+      loadUsers();
+    } else alert('作成失敗: ' + (j.error || res.status));
+  } catch (e) { alert('通信エラー: ' + e.message); }
+}
+async function resetPassword(key, name) {
+  const password = prompt('「' + name + '」の新しいパスワード(4文字以上)');
+  if (!password) return;
+  try {
+    const res = await fetch('/admin/users/' + encodeURIComponent(key) + '/password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+    const j = await res.json().catch(() => ({}));
+    if (res.ok) alert('パスワードを変更しました'); else alert('失敗: ' + (j.error || res.status));
+  } catch (e) { alert('通信エラー: ' + e.message); }
+}
+async function deleteUser(key, name) {
+  if (!confirm('「' + name + '」を削除しますか?（設定・サウンドも全て消えます）')) return;
+  try {
+    const res = await fetch('/admin/users/' + encodeURIComponent(key), { method: 'DELETE' });
+    const j = await res.json().catch(() => ({}));
+    if (res.ok) loadUsers(); else alert('削除失敗: ' + (j.error || res.status));
+  } catch (e) { alert('通信エラー: ' + e.message); }
+}
 
 let appConfig = {};
 socket.on('config', c => {
