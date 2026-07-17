@@ -312,8 +312,6 @@ document.getElementById('whoami').textContent = session.username || '';
 document.getElementById('overlayUrl').textContent = location.origin + '/overlay?u=' + encodeURIComponent(session.key || '');
 document.getElementById('btnLogout').onclick = async () => {
   try { await fetch('/logout', { method: 'POST' }); } catch (e) {}
-  // 別ユーザーが同じ端末でログインした時に前ユーザーの画面が出ないよう、SWのキャッシュを破棄
-  try { navigator.serviceWorker.controller.postMessage('clear-page-cache'); } catch (e) {}
   location.href = '/login';
 };
 // 管理者ならユーザー管理パネルを表示

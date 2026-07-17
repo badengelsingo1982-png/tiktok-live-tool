@@ -99,6 +99,27 @@
 <script>
 // ?u=<ユーザー名> でそのユーザーのイベントを購読 (マルチユーザー)
 const overlayUser = new URLSearchParams(location.search).get('u') || '';
+// ?debug=1 で音まわりのログを画面左下に表示(音が鳴らない時の原因調査用)
+const DEBUG = new URLSearchParams(location.search).get('debug') === '1';
+function debugLog(msg) {
+  try {
+    console.log('[sound]', msg);
+    if (!DEBUG) return;
+    let el = document.getElementById('sndlog');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'sndlog';
+      el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:9999;max-width:60vw;' +
+        'font:12px monospace;color:#0f0;background:rgba(0,0,0,.7);padding:6px;border-radius:4px;' +
+        'white-space:pre-wrap;pointer-events:none';
+      document.body.appendChild(el);
+    }
+    const line = document.createElement('div');
+    line.textContent = msg;
+    el.appendChild(line);
+    while (el.children.length > 8) el.removeChild(el.firstChild);
+  } catch (e) {}
+}
 const socket = overlayUser ? io({ auth: { overlay: overlayUser } }) : io();
 let config = null;
 socket.on('config', c => { config = c; applyEq(); });
@@ -145,6 +166,17 @@ const SILENT_WAV = 'data:audio/wav;base64,UklGRuwAAABXQVZFZm10IBAAAAABAAEAQB8AAE
 // mp3再生用の使い回しAudio要素(iOSはこの1要素をジェスチャ内でアンロックすれば以降再生可能)
 const sfx = new Audio();
 sfx.preload = 'auto';
+// 効果音の再生中は無音ループを止める(無音と効果音が重なってiOSで音が途切れるのを防ぐ)
+function sfxBusy() { return !!sfx.src && !sfx.paused && !sfx.ended; }
+sfx.addEventListener('playing', () => { stopKeepAlive(); });
+['ended', 'error', 'pause'].forEach(ev =>
+  sfx.addEventListener(ev, () => { if (audioUnlocked && !isOBS) startKeepAlive(); })
+);
+// 再生失敗の原因を追えるように(?debug=1 で画面表示)
+sfx.addEventListener('error', () => {
+  const e = sfx.error;
+  debugLog('効果音エラー: ' + (e ? 'code=' + e.code : '不明') + ' / ' + sfx.currentSrc);
+});
 
 // ---- サウンドEQ(イコライザー): 効果音を低/中/高音・全体音量で調整 ----
 // config.audio = { eqEnabled, eqLow, eqMid, eqHigh, volume }。有効時のみWeb Audio経由に切替。
@@ -202,6 +234,8 @@ function setupMediaSession() {
   } catch (e) {}
 }
 function startKeepAlive() {
+  // 効果音の再生中は無音を鳴らさない(重ねるとiOSで効果音が止まることがある)
+  if (sfxBusy()) return;
   try {
     if (!keepAlive) {
       keepAlive = new Audio(makeSilentWavUrl(1));
@@ -214,6 +248,7 @@ function startKeepAlive() {
     setupMediaSession();
   } catch (e) {}
 }
+function stopKeepAlive() { try { if (keepAlive) keepAlive.pause(); } catch (e) {} }
 // 画面スリープ防止(2台目端末をサウンドボードとして使う運用向け)
 let wakeLock = null;
 async function requestWakeLock() {
@@ -319,22 +354,33 @@ function beep(freq, dur) {
   } catch (e) {}
 }
 function playSound(url, fallbackFreq) {
-  if (url) {
-    // アンロック済みのsfx要素を使い回す(iOSで new Audio() が鳴らない対策)。失敗時はビープ
-    try {
-      // EQ有効ならWeb Audio経由に切替。経由時はAudioContextを起こしておく
-      if (config && config.audio && config.audio.eqEnabled) {
-        ensureEqGraph();
-        if (audioCtx && audioCtx.state === 'suspended') { try { audioCtx.resume(); } catch (e) {} }
-      }
-      sfx.src = url;
-      sfx.currentTime = 0;
-      const p = sfx.play();
-      if (p && p.catch) p.catch(() => beep(fallbackFreq, 0.5));
-    } catch (e) {
-      beep(fallbackFreq, 0.5);
+  if (!url) {
+    // サウンド未設定。ダッシュボードで音を割り当てるまではビープが鳴る
+    debugLog('サウンド未設定のためビープ');
+    beep(fallbackFreq, 0.5);
+    return;
+  }
+  // アンロック済みのsfx要素を使い回す(iOSで new Audio() が鳴らない対策)。失敗時はビープ
+  try {
+    // EQ有効ならWeb Audio経由に切替。経由時はAudioContextを起こしておく
+    if (config && config.audio && config.audio.eqEnabled) {
+      ensureEqGraph();
+      if (audioCtx && audioCtx.state === 'suspended') { try { audioCtx.resume(); } catch (e) {} }
     }
-  } else {
+    // 無音ループを先に止めてから鳴らす(重なりを避ける)
+    stopKeepAlive();
+    // src代入で頭出しされるので currentTime は触らない
+    // (読み込み前に currentTime を書くと一部ブラウザで例外になり、無音になっていた)
+    sfx.src = url;
+    sfx.load();
+    debugLog('再生: ' + url);
+    const p = sfx.play();
+    if (p && p.catch) p.catch(err => {
+      debugLog('play()拒否: ' + (err && err.name ? err.name : err));
+      beep(fallbackFreq, 0.5);
+    });
+  } catch (e) {
+    debugLog('再生例外: ' + (e && e.message ? e.message : e));
     beep(fallbackFreq, 0.5);
   }
 }
