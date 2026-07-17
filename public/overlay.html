@@ -183,7 +183,16 @@ sfx.addEventListener('error', () => {
 let eqGraph = null, eqFailed = false;
 function ensureEqGraph() {
   if (eqGraph || eqFailed) return eqGraph;
+  // createMediaElementSource(sfx) を呼ぶと、sfxの音は以後スピーカーへ直接出ず
+  // AudioContext経由でしか鳴らなくなる(元に戻せない)。アンロック前=suspended の
+  // うちに繋ぐと、効果音がまったく鳴らなくなる。必ず running を確認してから作る
+  if (!audioUnlocked) return null;
   if (!ensureAudioCtx()) return null;
+  if (audioCtx.state !== 'running') {
+    try { audioCtx.resume(); } catch (e) {}
+    debugLog('EQ待機: AudioContextが' + audioCtx.state + 'のため今回はEQ無しで再生');
+    return null; // EQよりも「音が鳴ること」を優先
+  }
   try {
     const source = audioCtx.createMediaElementSource(sfx);
     const low = audioCtx.createBiquadFilter(); low.type = 'lowshelf'; low.frequency.value = 200;
@@ -192,9 +201,21 @@ function ensureEqGraph() {
     const gain = audioCtx.createGain();
     source.connect(low); low.connect(mid); mid.connect(high); high.connect(gain); gain.connect(audioCtx.destination);
     eqGraph = { source, low, mid, high, gain };
+    debugLog('EQ有効化');
     applyEq();
-  } catch (e) { eqFailed = true; } // 失敗時は通常再生(sfx直接)にフォールバック
+  } catch (e) { eqFailed = true; debugLog('EQ構築失敗、EQ無しで再生: ' + e.message); }
   return eqGraph;
+}
+// EQ経由にしたのに音が出ない端末(iOSのMediaElementSource不具合)への保険。
+// フィルタを外してsource→destinationへ繋ぎ直し、EQは諦めて音を優先する
+function bypassEq() {
+  if (!eqGraph) return;
+  try {
+    eqGraph.source.disconnect();
+    eqGraph.source.connect(audioCtx.destination);
+    eqGraph = null; eqFailed = true;
+    debugLog('EQをバイパスしました(音が出ないため)');
+  } catch (e) {}
 }
 function applyEq() {
   const a = (config && config.audio) || {};
@@ -314,6 +335,9 @@ function unlockAudio() {
   // 画面スリープ防止(2台目端末運用向け)
   requestWakeLock();
   audioUnlocked = true;
+  // アンロック後(AudioContextがrunning)になって初めてEQを組む。
+  // ここより前に組むと sfx が鳴らなくなる。ensureEqGraph 側でも守っている
+  applyEq();
   const t = document.getElementById('tapToStart');
   if (t) t.style.display = 'none';
 }
@@ -336,6 +360,21 @@ if (!isOBS && tapEl) {
     const p = test.play();
     if (p && p.then) p.then(() => { try { test.pause(); } catch (e) {} if (!audioUnlocked) unlockAudio(); }).catch(() => {});
   } catch (e) {}
+}
+
+// EQ経由の再生が実際に進んでいるか監視し、進まなければEQをバイパスして鳴らし直す
+function watchEqPlayback() {
+  if (!eqGraph) return;
+  setTimeout(() => {
+    // 再生できる状態(readyState>=3)で再生中のはずなのに再生位置が動いていない
+    // = 音が出ていない。読み込みが遅いだけの場合を誤検知しないよう readyState も見る
+    if (eqGraph && !sfx.paused && sfx.readyState >= 3 && sfx.currentTime === 0) {
+      const url = sfx.src;
+      bypassEq();
+      try { sfx.load(); sfx.play(); } catch (e) {}
+      debugLog('EQ経由で無音だったため鳴らし直し: ' + url);
+    }
+  }, 600);
 }
 
 // ---- 音声再生 (mp3が無ければWebAudioビープにフォールバック) ----
@@ -369,6 +408,7 @@ function playSound(url, fallbackFreq) {
     }
     // 無音ループを先に止めてから鳴らす(重なりを避ける)
     stopKeepAlive();
+    watchEqPlayback();
     // src代入で頭出しされるので currentTime は触らない
     // (読み込み前に currentTime を書くと一部ブラウザで例外になり、無音になっていた)
     sfx.src = url;
