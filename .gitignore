@@ -10,7 +10,8 @@ soundboard.json
 gift-catalog.json
 sounds/*.mp3
 sounds/lib/
-public/icons/
+# public/icons/ は Git 管理する。自作アイコンをVPSへ配るため。
+# server.js の ensureIcons() はファイルが無い時だけ生成するので上書きされない
 
 # マルチユーザー版の実行時データ
 users.json

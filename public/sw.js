@@ -1,5 +1,6 @@
 // TikTok LIVE ツール Service Worker (PWAインストール要件を満たす最小構成)
-const CACHE = 'ttlive-v1';
+// アイコンを差し替えたらこの番号を上げる。古いキャッシュはactivateで削除される
+const CACHE = 'ttlive-v2';
 const SHELL = ['/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', event => {
