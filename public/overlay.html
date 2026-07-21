@@ -78,6 +78,16 @@
     color: #fff; font-size: 26px; font-weight: 800; text-align: center; line-height: 1.5;
     box-shadow: 0 0 30px rgba(255, 45, 85, 0.5);
   }
+
+  /* ---- 音声停止ボタン (他アプリの音を戻したい時に押す。OBSでは非表示) ---- */
+  #audioToggle {
+    position: absolute; top: 12px; right: 12px; z-index: 9998;
+    display: none; padding: 10px 16px; border: 0; border-radius: 12px;
+    background: rgba(15, 15, 25, 0.85); color: #fff;
+    font-size: 15px; font-weight: 700; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #audioToggle.off { background: rgba(120, 20, 20, 0.9); }
 </style>
 </head>
 <body>
@@ -94,6 +104,7 @@
   <div id="likes"><span class="heart">&#10084;</span> <span id="likeCount">0</span></div>
 
   <div id="tapToStart"><div class="box">🔊 画面をタップして<br>音声を有効化</div></div>
+  <button id="audioToggle" type="button">🔊 音声ON</button>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
@@ -153,6 +164,11 @@ function giftSoundFor(giftName, fallback) {
 }
 socket.on('status', s => {
   document.getElementById('likeCount').textContent = (s.likes || 0).toLocaleString();
+  // 配信していない間はオーディオセッションを手放す。掴んだままだと音楽アプリ等の
+  // 音が止まってしまうため。配信が始まったら自動で掴み直す(要アンロック済み)
+  if (isOBS || !audioUnlocked) return;
+  if (s.connected && !audioActive) startAudioSession();
+  else if (!s.connected && audioActive) stopAudioSession('配信が未接続');
 });
 
 // ---- 音声アンロック (iPad/iOS/スマホのブラウザ対策) ----
@@ -245,16 +261,53 @@ function makeSilentWavUrl(seconds) {
   return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
 }
 let keepAlive = null;
+// 無音ループでオーディオセッションを掴んでいるか。掴んでいる間はOSが
+// 「このタブが音楽を再生中」とみなし、他アプリ(音楽・動画)の音を止めてしまう。
+// そのため必要な時だけ掴み、不要になったら必ず手放す
+let audioActive = false;
 // OSに「メディア再生中」と認識させ、背面でも音を止められにくくする(iPad Split View等で有効)
 function setupMediaSession() {
   if (!('mediaSession' in navigator)) return;
   try {
     navigator.mediaSession.metadata = new MediaMetadata({ title: 'LIVEオーバーレイ', artist: '配信ツール' });
     navigator.mediaSession.playbackState = 'playing';
-    ['play', 'pause'].forEach(a => { try { navigator.mediaSession.setActionHandler(a, () => {}); } catch (e) {} });
+    // コントロールセンターの停止/一時停止で本当に止まるようにする。
+    // 以前は何もしないハンドラだったため、どこからも止められなかった
+    try { navigator.mediaSession.setActionHandler('pause', () => stopAudioSession('コントロールセンター')); } catch (e) {}
+    try { navigator.mediaSession.setActionHandler('stop', () => stopAudioSession('コントロールセンター')); } catch (e) {}
+    try { navigator.mediaSession.setActionHandler('play', () => startAudioSession()); } catch (e) {}
   } catch (e) {}
 }
+// オーディオセッションを完全に手放す。これで他アプリの音が戻る
+function stopAudioSession(why) {
+  audioActive = false;
+  try { if (keepAlive) { keepAlive.pause(); keepAlive.currentTime = 0; } } catch (e) {}
+  try { sfx.pause(); } catch (e) {}
+  try { if (window.speechSynthesis) speechSynthesis.cancel(); } catch (e) {}
+  try { if (audioCtx && audioCtx.state === 'running') audioCtx.suspend(); } catch (e) {}
+  try { if (navigator.mediaSession) { navigator.mediaSession.playbackState = 'none'; navigator.mediaSession.metadata = null; } } catch (e) {}
+  try { if (wakeLock) { wakeLock.release(); wakeLock = null; } } catch (e) {}
+  syncAudioButton();
+  debugLog('音声セッション停止: ' + (why || ''));
+}
+// 手放したセッションを掴み直す
+function startAudioSession() {
+  audioActive = true;
+  try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (e) {}
+  startKeepAlive();
+  requestWakeLock();
+  syncAudioButton();
+  debugLog('音声セッション開始');
+}
+function syncAudioButton() {
+  const b = document.getElementById('audioToggle');
+  if (!b) return;
+  b.textContent = audioActive ? '🔊 音声ON' : '🔇 音声OFF';
+  b.classList.toggle('off', !audioActive);
+}
 function startKeepAlive() {
+  // 停止中は掴み直さない(他アプリの音を奪わないため)
+  if (!audioActive) return;
   // 効果音の再生中は無音を鳴らさない(重ねるとiOSで効果音が止まることがある)
   if (sfxBusy()) return;
   try {
@@ -282,6 +335,7 @@ async function requestWakeLock() {
 }
 // タブ復帰・フォーカス時にオーディオを立て直す
 function resumeAudio() {
+  if (!audioActive) return; // 停止中は何もしない(他アプリの音を奪わない)
   ensureAudioCtx();
   try { if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } catch (e) {}
   startKeepAlive();
@@ -294,6 +348,18 @@ if (!isOBS) {
   window.addEventListener('pageshow', resumeAudio);
   // 定期ハートビート: 10秒の停止タイマーに間に合うよう8秒ごとに無音を鳴らし直す
   setInterval(resumeAudio, 8000);
+  // タブ/PWAを閉じた時に必ずセッションを手放す(閉じたのに音を掴んだままにしない)
+  window.addEventListener('pagehide', () => stopAudioSession('ページを閉じた'));
+  // 停止ボタン
+  const btn = document.getElementById('audioToggle');
+  if (btn) {
+    btn.style.display = 'block';
+    btn.addEventListener('click', e => {
+      e.stopPropagation(); // 画面タップのアンロック処理と二重に反応させない
+      if (audioActive) stopAudioSession('ボタン');
+      else { if (!audioUnlocked) unlockAudio(); else startAudioSession(); }
+    });
+  }
   // PWA(ホーム画面アプリ)化のためService Worker登録。OBSでは登録しない
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
@@ -330,11 +396,13 @@ function unlockAudio() {
       warm.volume = 0; speechSynthesis.speak(warm);
     }
   } catch (e) {}
+  audioUnlocked = true;
   // 無音ループ開始(バックグラウンドでもオーディオセッションを維持)
+  audioActive = true;
   startKeepAlive();
+  syncAudioButton();
   // 画面スリープ防止(2台目端末運用向け)
   requestWakeLock();
-  audioUnlocked = true;
   // アンロック後(AudioContextがrunning)になって初めてEQを組む。
   // ここより前に組むと sfx が鳴らなくなる。ensureEqGraph 側でも守っている
   applyEq();
@@ -393,6 +461,8 @@ function beep(freq, dur) {
   } catch (e) {}
 }
 function playSound(url, fallbackFreq) {
+  // 音声OFF中は鳴らさない(ボタンやコントロールセンターで止めた状態)
+  if (!isOBS && !audioActive) { debugLog('音声OFF中のため再生しない'); return; }
   if (!url) {
     // サウンド未設定。ダッシュボードで音を割り当てるまではビープが鳴る
     debugLog('サウンド未設定のためビープ');
@@ -451,6 +521,7 @@ function pickVoice(lang, gender) {
 }
 function speak(text) {
   if (!config || !config.tts || !config.tts.enabled) return;
+  if (!isOBS && !audioActive) return; // 音声OFF中は読み上げない
   const max = config.tts.maxLength || 60;
   ttsQueue.push(text.slice(0, max));
   processTts();
