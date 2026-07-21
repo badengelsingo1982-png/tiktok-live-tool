@@ -79,10 +79,13 @@
     box-shadow: 0 0 30px rgba(255, 45, 85, 0.5);
   }
 
-  /* ---- 音声停止ボタン (他アプリの音を戻したい時に押す。OBSでは非表示) ---- */
-  #audioToggle {
+  /* ---- 右上の操作ボタン (OBSでは非表示) ---- */
+  #controls {
     position: absolute; top: 12px; right: 12px; z-index: 9998;
-    display: none; padding: 10px 16px; border: 0; border-radius: 12px;
+    display: none; gap: 8px;
+  }
+  #controls button {
+    padding: 10px 16px; border: 0; border-radius: 12px;
     background: rgba(15, 15, 25, 0.85); color: #fff;
     font-size: 15px; font-weight: 700; cursor: pointer;
     -webkit-tap-highlight-color: transparent;
@@ -104,7 +107,10 @@
   <div id="likes"><span class="heart">&#10084;</span> <span id="likeCount">0</span></div>
 
   <div id="tapToStart"><div class="box">🔊 画面をタップして<br>音声を有効化</div></div>
-  <button id="audioToggle" type="button">🔊 音声ON</button>
+  <div id="controls">
+    <button id="audioToggle" type="button">🔊 音声ON</button>
+    <button id="btnDashboard" type="button">⚙ 設定へ</button>
+  </div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
@@ -350,14 +356,25 @@ if (!isOBS) {
   setInterval(resumeAudio, 8000);
   // タブ/PWAを閉じた時に必ずセッションを手放す(閉じたのに音を掴んだままにしない)
   window.addEventListener('pagehide', () => stopAudioSession('ページを閉じた'));
-  // 停止ボタン
+  // 右上の操作ボタンを表示
+  const ctrls = document.getElementById('controls');
+  if (ctrls) ctrls.style.display = 'flex';
+  // 音声ON/OFF
   const btn = document.getElementById('audioToggle');
   if (btn) {
-    btn.style.display = 'block';
     btn.addEventListener('click', e => {
       e.stopPropagation(); // 画面タップのアンロック処理と二重に反応させない
       if (audioActive) stopAudioSession('ボタン');
       else { if (!audioUnlocked) unlockAudio(); else startAudioSession(); }
+    });
+  }
+  // 設定(ダッシュボード)へ。PWAは全画面で戻るボタンが無いため1タップで行けるようにする
+  const dash = document.getElementById('btnDashboard');
+  if (dash) {
+    dash.addEventListener('click', e => {
+      e.stopPropagation();
+      stopAudioSession('設定へ移動'); // 離れる前にオーディオセッションを手放す
+      location.href = '/dashboard';
     });
   }
   // PWA(ホーム画面アプリ)化のためService Worker登録。OBSでは登録しない

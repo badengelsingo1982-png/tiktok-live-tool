@@ -92,6 +92,7 @@
     <h1 style="margin:0">TikTok LIVE ツール <span class="dot">●</span> 管理画面</h1>
     <div class="row" style="gap:10px">
       <span class="k" style="color:var(--sub)">👤 <b id="whoami" style="color:var(--txt)"></b></span>
+      <button id="btnOverlay">🔊 オーバーレイへ</button>
       <button class="ghost" id="btnLogout">ログアウト</button>
     </div>
   </div>
@@ -309,7 +310,10 @@
 const session = window.__SESSION__ || {};
 const socket = io();
 document.getElementById('whoami').textContent = session.username || '';
-document.getElementById('overlayUrl').textContent = location.origin + '/overlay?u=' + encodeURIComponent(session.key || '');
+const overlayHref = '/overlay?u=' + encodeURIComponent(session.key || '');
+document.getElementById('overlayUrl').textContent = location.origin + overlayHref;
+// ホーム画面に戻らず1タップでオーバーレイへ(PWAは全画面で戻るボタンが無いため)
+document.getElementById('btnOverlay').onclick = () => { location.href = overlayHref; };
 document.getElementById('btnLogout').onclick = async () => {
   try { await fetch('/logout', { method: 'POST' }); } catch (e) {}
   location.href = '/login';
