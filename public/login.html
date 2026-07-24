@@ -35,6 +35,8 @@
     <div class="hint">アカウントは管理者が発行します。ログインできない場合は管理者にお問い合わせください。</div>
   </form>
 <script>
+// サブパス配信時のプレフィックス (例 /tiktok)。ルート直下配信なら空文字
+const B = window.__BASE__ || '';
 const form = document.getElementById('loginForm');
 const err = document.getElementById('err');
 const btn = document.getElementById('btn');
@@ -43,7 +45,7 @@ form.addEventListener('submit', async (e) => {
   err.textContent = '';
   btn.disabled = true;
   try {
-    const res = await fetch('/login', {
+    const res = await fetch(B + '/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         username: document.getElementById('username').value.trim(),
@@ -51,7 +53,7 @@ form.addEventListener('submit', async (e) => {
       })
     });
     const j = await res.json().catch(() => ({}));
-    if (res.ok) { location.href = '/dashboard'; return; }
+    if (res.ok) { location.href = B + '/dashboard'; return; }
     err.textContent = j.error || 'ログインに失敗しました';
   } catch (e2) { err.textContent = '通信エラー: ' + e2.message; }
   finally { btn.disabled = false; }

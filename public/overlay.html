@@ -6,12 +6,12 @@
 <meta name="robots" content="noindex, nofollow, noarchive">
 <title>Overlay</title>
 <!-- PWA: 2台目端末でホーム画面アプリ化(全画面・前面運用向け)。OBSでは無視される -->
-<link rel="manifest" href="/overlay.webmanifest">
+<link rel="manifest" href="overlay.webmanifest">
 <meta name="theme-color" content="#000000">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="apple-mobile-web-app-title" content="LIVE通知">
-<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
 <style>
   /* OBSブラウザソース用: 背景は完全透過 */
   html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; width: 100vw; height: 100vh; }
@@ -112,7 +112,7 @@
     <button id="btnDashboard" type="button">⚙ 設定へ</button>
   </div>
 
-<script src="/socket.io/socket.io.js"></script>
+<script src="socket.io/socket.io.js"></script>
 <script>
 // ?u=<ユーザー名> でそのユーザーのイベントを購読 (マルチユーザー)
 const overlayUser = new URLSearchParams(location.search).get('u') || '';
@@ -137,7 +137,9 @@ function debugLog(msg) {
     while (el.children.length > 8) el.removeChild(el.firstChild);
   } catch (e) {}
 }
-const socket = overlayUser ? io({ auth: { overlay: overlayUser } }) : io();
+// サブパス配信時のプレフィックス (例 /tiktok)。ルート直下配信なら空文字
+const B = window.__BASE__ || '';
+const socket = io(overlayUser ? { path: B + '/socket.io', auth: { overlay: overlayUser } } : { path: B + '/socket.io' });
 let config = null;
 socket.on('config', c => { config = c; applyEq(); });
 // ユーザー未指定なら注意表示(OBSにURLを?u=付きで登録する必要がある)
@@ -374,12 +376,12 @@ if (!isOBS) {
     dash.addEventListener('click', e => {
       e.stopPropagation();
       stopAudioSession('設定へ移動'); // 離れる前にオーディオセッションを手放す
-      location.href = '/dashboard';
+      location.href = B + '/dashboard';
     });
   }
   // PWA(ホーム画面アプリ)化のためService Worker登録。OBSでは登録しない
   if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+    window.addEventListener('load', () => navigator.serviceWorker.register(B + '/sw.js').catch(() => {}));
   }
 }
 
@@ -486,6 +488,8 @@ function playSound(url, fallbackFreq) {
     beep(fallbackFreq, 0.5);
     return;
   }
+  // サウンドは "/s/..." とベースパス抜きで保存されているのでここで補う
+  if (url.charAt(0) === '/') url = B + url;
   // アンロック済みのsfx要素を使い回す(iOSで new Audio() が鳴らない対策)。失敗時はビープ
   try {
     // EQ有効ならWeb Audio経由に切替。経由時はAudioContextを起こしておく

@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow, noarchive">
 <title>TikTok LIVE ツール 管理画面</title>
-<link rel="manifest" href="/manifest.webmanifest">
+<link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#0d1017">
-<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="LIVEツール">
 <style>
@@ -304,19 +304,21 @@
     </div>
   </div>
 
-<script src="/socket.io/socket.io.js"></script>
+<script src="socket.io/socket.io.js"></script>
 <script>
 // ログイン中ユーザー (サーバーが注入)。socketはCookieセッションで自動認証される
 const session = window.__SESSION__ || {};
-const socket = io();
+// サブパス配信時のプレフィックス (例 /tiktok)。ルート直下配信なら空文字
+const B = window.__BASE__ || '';
+const socket = io({ path: B + '/socket.io' });
 document.getElementById('whoami').textContent = session.username || '';
-const overlayHref = '/overlay?u=' + encodeURIComponent(session.key || '');
+const overlayHref = B + '/overlay?u=' + encodeURIComponent(session.key || '');
 document.getElementById('overlayUrl').textContent = location.origin + overlayHref;
 // ホーム画面に戻らず1タップでオーバーレイへ(PWAは全画面で戻るボタンが無いため)
 document.getElementById('btnOverlay').onclick = () => { location.href = overlayHref; };
 document.getElementById('btnLogout').onclick = async () => {
-  try { await fetch('/logout', { method: 'POST' }); } catch (e) {}
-  location.href = '/login';
+  try { await fetch(B + '/logout', { method: 'POST' }); } catch (e) {}
+  location.href = B + '/login';
 };
 // 管理者ならユーザー管理パネルを表示
 if (session.isAdmin) {
@@ -334,7 +336,7 @@ socket.on('buildId', id => {
 // ---- ユーザー管理 (管理者) ----
 async function loadUsers() {
   try {
-    const res = await fetch('/admin/users');
+    const res = await fetch(B + '/admin/users');
     if (!res.ok) return;
     const j = await res.json();
     const box = document.getElementById('userList');
@@ -347,7 +349,7 @@ async function loadUsers() {
       row.innerHTML = `<span style="min-width:180px">👤 <b>${esc(u.username)}</b> <span class="k" style="color:var(--sub)">${u.isAdmin ? '管理者' : ''}</span></span>`;
       const overlay = document.createElement('button'); overlay.className = 'ghost'; overlay.textContent = 'オーバーレイURL';
       overlay.onclick = () => {
-        const url = location.origin + '/overlay?u=' + encodeURIComponent(u.key);
+        const url = location.origin + B + '/overlay?u=' + encodeURIComponent(u.key);
         navigator.clipboard && navigator.clipboard.writeText(url).catch(() => {});
         prompt('このユーザーのオーバーレイURL（コピーしてOBS等に登録）', url);
       };
@@ -369,7 +371,7 @@ async function createUser() {
   const isAdmin = document.getElementById('newUserAdmin').checked;
   if (!username || !password) { alert('ユーザー名とパスワードを入力してください'); return; }
   try {
-    const res = await fetch('/admin/users', {
+    const res = await fetch(B + '/admin/users', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password, isAdmin })
     });
@@ -386,7 +388,7 @@ async function resetPassword(key, name) {
   const password = prompt('「' + name + '」の新しいパスワード(4文字以上)');
   if (!password) return;
   try {
-    const res = await fetch('/admin/users/' + encodeURIComponent(key) + '/password', {
+    const res = await fetch(B + '/admin/users/' + encodeURIComponent(key) + '/password', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password })
     });
@@ -397,7 +399,7 @@ async function resetPassword(key, name) {
 async function deleteUser(key, name) {
   if (!confirm('「' + name + '」を削除しますか?（設定・サウンドも全て消えます）')) return;
   try {
-    const res = await fetch('/admin/users/' + encodeURIComponent(key), { method: 'DELETE' });
+    const res = await fetch(B + '/admin/users/' + encodeURIComponent(key), { method: 'DELETE' });
     const j = await res.json().catch(() => ({}));
     if (res.ok) loadUsers(); else alert('削除失敗: ' + (j.error || res.status));
   } catch (e) { alert('通信エラー: ' + e.message); }
@@ -475,7 +477,7 @@ function renderAlertSelects() {
 async function setAlertSound(type, soundId) {
   if (soundId === '__keep__') return; // 既存音の保持（変更なし）
   try {
-    const res = await fetch('/set-sound/' + type, {
+    const res = await fetch(B + '/set-sound/' + type, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ soundId })
     });
@@ -489,13 +491,13 @@ function previewAlert(type) {
   if (sel.value === '__keep__') file = (appConfig.alerts && appConfig.alerts[type] && appConfig.alerts[type].sound) || '';
   else { const item = soundboard.library.find(i => i.id === sel.value); file = item ? item.file : ''; }
   if (!file) { alert('「なし」に設定されています（ビープ音）'); return; }
-  new Audio(file).play().catch(() => {});
+  new Audio(B + file).play().catch(() => {});
 }
 
 // ---- config へのパッチ保存 (トップレベルの sub-object 単位で送る=浅いマージ対策) ----
 async function patchConfig(patch) {
   try {
-    const res = await fetch('/config', {
+    const res = await fetch(B + '/config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch)
     });
@@ -653,7 +655,7 @@ function renderSoundboard() {
       row.className = 'row';
       row.innerHTML = `<span style="min-width:160px">${esc(item.name)}</span>`;
       const play = document.createElement('button'); play.className = 'ghost'; play.textContent = '▶ 試聴';
-      play.onclick = () => { new Audio(item.file).play().catch(() => {}); };
+      play.onclick = () => { new Audio(B + item.file).play().catch(() => {}); };
       const del = document.createElement('button'); del.className = 'ghost'; del.textContent = '削除';
       del.onclick = () => deleteLibSound(item.id, item.name);
       row.appendChild(play); row.appendChild(del);
@@ -707,7 +709,7 @@ async function searchMyinstants() {
   btn.disabled = true;
   box.innerHTML = '<span class="k" style="color:var(--sub)">検索中…</span>';
   try {
-    const res = await fetch('/myinstants/search?q=' + encodeURIComponent(q));
+    const res = await fetch(B + '/myinstants/search?q=' + encodeURIComponent(q));
     const j = await res.json().catch(() => ({}));
     if (!res.ok) { box.innerHTML = `<span class="k" style="color:var(--accent)">${esc(j.error || '検索失敗')}</span>`; return; }
     if (!j.items || !j.items.length) { box.innerHTML = '<span class="k" style="color:var(--sub)">見つかりませんでした</span>'; return; }
@@ -737,7 +739,7 @@ async function searchMyinstants() {
 async function importMyinstants(it, btn) {
   btn.disabled = true; const orig = btn.textContent; btn.textContent = '追加中…';
   try {
-    const res = await fetch('/soundboard/import', {
+    const res = await fetch(B + '/soundboard/import', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: it.name, mp3: it.mp3 })
     });
@@ -768,7 +770,7 @@ async function uploadLibSound() {
   fd.append('name', name);
   fd.append('sound', file);
   try {
-    const res = await fetch('/soundboard/upload', { method: 'POST', body: fd });
+    const res = await fetch(B + '/soundboard/upload', { method: 'POST', body: fd });
     const j = await res.json().catch(() => ({}));
     if (res.ok) closeLibModal();
     else alert('追加失敗: ' + (j.error || res.status));
@@ -777,7 +779,7 @@ async function uploadLibSound() {
 }
 async function deleteLibSound(id, name) {
   if (!confirm('「' + name + '」を削除しますか?（割当も解除されます）')) return;
-  try { await fetch('/soundboard/library/' + id, { method: 'DELETE' }); }
+  try { await fetch(B + '/soundboard/library/' + id, { method: 'DELETE' }); }
   catch (e) { alert('通信エラー: ' + e.message); }
 }
 async function addRule() {
@@ -786,7 +788,7 @@ async function addRule() {
   if (!gift) { alert('ギフト名を入力してください'); return; }
   if (!soundId) { alert('先にライブラリへサウンドを追加してください'); return; }
   try {
-    const res = await fetch('/soundboard/rule', {
+    const res = await fetch(B + '/soundboard/rule', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ gift, soundId })
     });
@@ -795,7 +797,7 @@ async function addRule() {
 }
 async function removeRule(gift) {
   try {
-    await fetch('/soundboard/rule', {
+    await fetch(B + '/soundboard/rule', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ gift, soundId: '' })
     });
@@ -804,7 +806,7 @@ async function removeRule(gift) {
 
 // PWA: Service Worker 登録
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  window.addEventListener('load', () => navigator.serviceWorker.register(B + '/sw.js').catch(() => {}));
 }
 
 function esc(s) {

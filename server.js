@@ -310,15 +310,20 @@ ensureIcons();
 // 起動ごとに変わるビルドID。オーバーレイ/ダッシュボードはこの変化で自動リロードする
 const BUILD_ID = crypto.randomBytes(6).toString('hex');
 
+// サブパス配信 (例: BASE_PATH=/tiktok → https://ホスト/tiktok/dashboard)。
+// 未設定なら従来どおりルート直下。1台のサーバーに複数アプリを載せるための土台。
+const BASE = (process.env.BASE_PATH || '').replace(/\/+$/, '');
+
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, { path: BASE + '/socket.io' });
+const router = express.Router();
 
 app.use(express.json());
 
 // ---- 検索エンジン避け ----
 app.use((req, res, next) => { res.set('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet'); next(); });
-app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nDisallow: /\n'));
+router.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nDisallow: /\n'));
 
 // ============================================================
 // 認証ミドルウェア
@@ -332,7 +337,7 @@ function reqToken(req) {
 function requireUser(req, res, next) {
     const key = verifyTokenStr(reqToken(req));
     if (!key) {
-        if (req.method === 'GET' && (req.headers.accept || '').includes('text/html')) return res.redirect('/login');
+        if (req.method === 'GET' && (req.headers.accept || '').includes('text/html')) return res.redirect(BASE + '/login');
         return res.status(401).json({ error: 'ログインが必要です' });
     }
     req.userKey = key; req.user = users[key];
@@ -348,21 +353,27 @@ function requireAdmin(req, res, next) {
 // ============================================================
 // ログイン / ログアウト
 // ============================================================
-app.get('/login', (req, res) => {
+// public/*.html を返す共通処理。クライアントがURLを組み立てられるよう BASE を注入する
+function sendHtml(res, file, extraJS) {
+    let html = fs.readFileSync(path.join(__dirname, 'public', file), 'utf8');
+    const inject = `<script>window.__BASE__=${JSON.stringify(BASE)};${extraJS || ''}</script>\n</head>`;
+    html = html.replace('</head>', inject);
     res.set('Cache-Control', 'no-store');
-    res.sendFile(path.join(__dirname, 'public', 'login.html'));
-});
-app.post('/login', (req, res) => {
+    res.type('html').send(html);
+}
+
+router.get('/login', (req, res) => sendHtml(res, 'login.html'));
+router.post('/login', (req, res) => {
     const { username, password } = req.body || {};
     const key = verifyUser(username, password);
     if (!key) return res.status(401).json({ error: 'ユーザー名またはパスワードが違います' });
     const tok = signToken(key);
-    res.set('Set-Cookie', `sid=${encodeURIComponent(tok)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 864e5 / 1000}`);
+    res.set('Set-Cookie', `sid=${encodeURIComponent(tok)}; Path=${BASE || '/'}; HttpOnly; SameSite=Lax; Max-Age=${30 * 864e5 / 1000}`);
     getTenant(key);
     res.json({ ok: true });
 });
-app.post('/logout', (req, res) => {
-    res.set('Set-Cookie', 'sid=; Path=/; HttpOnly; Max-Age=0');
+router.post('/logout', (req, res) => {
+    res.set('Set-Cookie', `sid=; Path=${BASE || '/'}; HttpOnly; Max-Age=0`);
     res.json({ ok: true });
 });
 
@@ -370,24 +381,21 @@ app.post('/logout', (req, res) => {
 // ダッシュボード (要ログイン)。ユーザー情報を注入
 // ============================================================
 function serveDashboard(req, res) {
-    let html = fs.readFileSync(path.join(__dirname, 'public', 'dashboard.html'), 'utf8');
     const sess = { username: req.user.username, key: req.userKey, isAdmin: !!req.user.isAdmin };
-    html = html.replace('</head>', `<script>window.__SESSION__=${JSON.stringify(sess)};</script>\n</head>`);
-    res.set('Cache-Control', 'no-store');
-    res.type('html').send(html);
+    sendHtml(res, 'dashboard.html', `window.__SESSION__=${JSON.stringify(sess)};`);
 }
-app.get('/dashboard', requireUser, serveDashboard);
-app.get('/dashboard.html', requireUser, serveDashboard);
-app.get('/', (req, res) => res.redirect('/dashboard'));
+router.get('/dashboard', requireUser, serveDashboard);
+router.get('/dashboard.html', requireUser, serveDashboard);
+router.get('/', (req, res) => res.redirect(BASE + '/dashboard'));
 
 // ============================================================
 // 管理者API: ユーザーの作成・削除・一覧・パスワード変更
 // ============================================================
-app.get('/admin/users', requireAdmin, (req, res) => {
+router.get('/admin/users', requireAdmin, (req, res) => {
     const list = Object.keys(users).map(k => ({ key: k, username: users[k].username, isAdmin: !!users[k].isAdmin, createdAt: users[k].createdAt || 0 }));
     res.json({ users: list });
 });
-app.post('/admin/users', requireAdmin, (req, res) => {
+router.post('/admin/users', requireAdmin, (req, res) => {
     try {
         const { username, password, isAdmin } = req.body || {};
         if (users[normKey(username)]) return res.status(400).json({ error: 'そのユーザー名は既にあります' });
@@ -395,7 +403,7 @@ app.post('/admin/users', requireAdmin, (req, res) => {
         res.json({ ok: true, user: { key: normKey(username), username: u.username, isAdmin: u.isAdmin } });
     } catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.post('/admin/users/:name/password', requireAdmin, (req, res) => {
+router.post('/admin/users/:name/password', requireAdmin, (req, res) => {
     try {
         const key = normKey(req.params.name);
         if (!users[key]) return res.status(404).json({ error: 'ユーザーがいません' });
@@ -403,7 +411,7 @@ app.post('/admin/users/:name/password', requireAdmin, (req, res) => {
         res.json({ ok: true });
     } catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.delete('/admin/users/:name', requireAdmin, (req, res) => {
+router.delete('/admin/users/:name', requireAdmin, (req, res) => {
     const key = normKey(req.params.name);
     if (!users[key]) return res.status(404).json({ error: 'ユーザーがいません' });
     if (key === req.userKey) return res.status(400).json({ error: '自分自身は削除できません' });
@@ -426,17 +434,17 @@ function sendSound(res, user, rel) {
     if (!fs.existsSync(target)) return res.status(404).end();
     res.sendFile(target);
 }
-app.get('/s/:user/lib/:file', (req, res) => sendSound(res, req.params.user, path.join('lib', path.basename(req.params.file))));
-app.get('/s/:user/:file', (req, res) => sendSound(res, req.params.user, path.basename(req.params.file)));
+router.get('/s/:user/lib/:file', (req, res) => sendSound(res, req.params.user, path.join('lib', path.basename(req.params.file))));
+router.get('/s/:user/:file', (req, res) => sendSound(res, req.params.user, path.basename(req.params.file)));
 
 // ---- 静的 & オーバーレイ ----
 // PWA: ホーム画面に追加した時に ?u=<ユーザー名> を保持するため、manifest をユーザーごとに生成する。
 // (静的配信より先に登録してこちらを優先させる)
-app.get('/overlay.webmanifest', (req, res) => {
+router.get('/overlay.webmanifest', (req, res) => {
     const m = readJSON(path.join(__dirname, 'public', 'overlay.webmanifest'), {});
     const key = normKey(req.query.u);
     if (key) {
-        const url = '/overlay?u=' + encodeURIComponent(key);
+        const url = BASE + '/overlay?u=' + encodeURIComponent(key);
         const label = users[key] ? users[key].username : key;
         m.id = url;              // ユーザーごとに別アプリとしてインストールできるようにする
         m.start_url = url;
@@ -446,15 +454,16 @@ app.get('/overlay.webmanifest', (req, res) => {
     res.set('Cache-Control', 'no-store');
     res.type('application/manifest+json').send(JSON.stringify(m));
 });
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('/overlay', (req, res) => {
+router.use(express.static(path.join(__dirname, 'public')));
+router.get('/overlay', (req, res) => {
     // manifest の参照先に ?u= を引き継ぐ。これが無いとインストール後に /overlay へ落ちる
     let html = fs.readFileSync(path.join(__dirname, 'public', 'overlay.html'), 'utf8');
     const key = normKey(req.query.u);
     if (key) {
-        html = html.replace('href="/overlay.webmanifest"',
-            `href="/overlay.webmanifest?u=${encodeURIComponent(key)}"`);
+        html = html.replace('href="overlay.webmanifest"',
+            `href="overlay.webmanifest?u=${encodeURIComponent(key)}"`);
     }
+    html = html.replace('</head>', `<script>window.__BASE__=${JSON.stringify(BASE)};</script>\n</head>`);
     res.set('Cache-Control', 'no-store');
     res.type('html').send(html);
 });
@@ -462,19 +471,19 @@ app.get('/overlay', (req, res) => {
 // ============================================================
 // ユーザー別データAPI (要ログイン。自分のテナントを操作)
 // ============================================================
-app.get('/config', requireUser, (req, res) => res.json(getTenant(req.userKey).config));
-app.post('/config', requireUser, (req, res) => {
+router.get('/config', requireUser, (req, res) => res.json(getTenant(req.userKey).config));
+router.post('/config', requireUser, (req, res) => {
     const t = getTenant(req.userKey);
     t.config = { ...t.config, ...req.body };
     saveTenantConfig(t);
     io.to(t.key).emit('config', t.config);
     res.json({ ok: true });
 });
-app.get('/soundboard', requireUser, (req, res) => res.json(getTenant(req.userKey).soundboard));
-app.get('/gift-catalog', requireUser, (req, res) => res.json(getTenant(req.userKey).giftCatalog));
+router.get('/soundboard', requireUser, (req, res) => res.json(getTenant(req.userKey).soundboard));
+router.get('/gift-catalog', requireUser, (req, res) => res.json(getTenant(req.userKey).giftCatalog));
 
 // アラート効果音をライブラリのサウンドに設定 (soundId空でビープ音)
-app.post('/set-sound/:type', requireUser, (req, res) => {
+router.post('/set-sound/:type', requireUser, (req, res) => {
     const type = (req.params.type || '').toLowerCase();
     if (!SOUND_TYPES.includes(type)) return res.status(400).json({ error: '種類が不正です' });
     const t = getTenant(req.userKey);
@@ -494,7 +503,7 @@ app.post('/set-sound/:type', requireUser, (req, res) => {
 });
 
 // ライブラリに音を追加 (ファイルアップロード)
-app.post('/soundboard/upload', requireUser, (req, res) => {
+router.post('/soundboard/upload', requireUser, (req, res) => {
     req._soundId = crypto.randomBytes(6).toString('hex');
     libUpload.single('sound')(req, res, err => {
         if (err) return res.status(400).json({ error: err.message });
@@ -510,7 +519,7 @@ app.post('/soundboard/upload', requireUser, (req, res) => {
 });
 
 // ライブラリから音を削除
-app.delete('/soundboard/library/:id', requireUser, (req, res) => {
+router.delete('/soundboard/library/:id', requireUser, (req, res) => {
     const t = getTenant(req.userKey);
     const id = req.params.id;
     const item = t.soundboard.library.find(l => l.id === id);
@@ -523,7 +532,7 @@ app.delete('/soundboard/library/:id', requireUser, (req, res) => {
 });
 
 // ギフト→サウンドの割当
-app.post('/soundboard/rule', requireUser, (req, res) => {
+router.post('/soundboard/rule', requireUser, (req, res) => {
     const t = getTenant(req.userKey);
     const gift = (req.body.gift || '').toString().trim();
     const soundId = (req.body.soundId || '').toString().trim();
@@ -555,7 +564,7 @@ function parseInstants(html) {
     }
     return items;
 }
-app.get('/myinstants/search', requireUser, async (req, res) => {
+router.get('/myinstants/search', requireUser, async (req, res) => {
     const q = (req.query.q || '').toString().trim();
     if (q.length < 2) return res.status(400).json({ error: '2文字以上で検索してください' });
     try {
@@ -564,7 +573,7 @@ app.get('/myinstants/search', requireUser, async (req, res) => {
         res.json({ items: parseInstants(await r.text()) });
     } catch (e) { res.status(502).json({ error: '通信エラー: ' + e.message }); }
 });
-app.post('/soundboard/import', requireUser, async (req, res) => {
+router.post('/soundboard/import', requireUser, async (req, res) => {
     let mp3 = (req.body.mp3 || '').toString().trim();
     const name = (req.body.name || '').toString().trim().slice(0, 40) || 'サウンド';
     if (!mp3) return res.status(400).json({ error: '音声URLがありません' });
@@ -589,6 +598,9 @@ app.post('/soundboard/import', requireUser, async (req, res) => {
         res.json({ ok: true, entry });
     } catch (e) { res.status(502).json({ error: '取得エラー: ' + e.message }); }
 });
+
+// 全ルートをまとめて BASE 配下にぶら下げる
+app.use(BASE || '/', router);
 
 // ============================================================
 // TikTok LIVE 接続 (テナントごと)
