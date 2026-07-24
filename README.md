@@ -16,6 +16,25 @@ node server.js
    - 幅 1920 / 高さ 1080
 4. 管理画面のテストボタンでオーバーレイの動作確認(配信してなくてもOK)
 
+### サブパスで公開する場合
+
+1台のサーバーに複数アプリを載せる時は、環境変数 `BASE_PATH` で公開パスをずらせます。
+
+```bash
+BASE_PATH=/tiktok node server.js   # → /tiktok/dashboard, /tiktok/overlay
+```
+
+リバースプロキシ側はパスを**そのまま**(プレフィックスを剥がさずに)渡してください。Caddyなら:
+
+```
+@tiktok path /tiktok /tiktok/*
+handle @tiktok {
+	reverse_proxy localhost:8181
+}
+```
+
+未設定なら従来どおりルート直下(`/dashboard`, `/overlay`)で動きます。
+
 ## 機能
 
 - **ギフトアラート**: 中央上部にポップアップ+効果音+TTS。連打ギフトは確定時のみ表示(重複防止済み)
