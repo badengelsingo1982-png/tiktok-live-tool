@@ -542,16 +542,18 @@ function currentTts() {
   // 「声」セレクトの値は "browser:auto" / "voicevox:3" の形。
   // 一覧の取得前は空なので、その時は保存済みの設定をそのまま使う(勝手に上書きしない)
   const raw = (document.getElementById('ttsVoice').value || '');
-  const [kind, val] = raw.split(':');
-  const isVv = kind === 'voicevox';
+  const kind = raw.slice(0, raw.indexOf(':'));
+  const val = raw.slice(raw.indexOf(':') + 1);
+  const isVv = kind === 'voicevox', isAz = kind === 'azure';
   return {
     ...prev,
     enabled: document.getElementById('ttsEnabled').checked,
     readComments: document.getElementById('ttsReadComments').checked,
     readGifts: document.getElementById('ttsReadGifts').checked,
-    engine: raw ? (isVv ? 'voicevox' : 'browser') : (prev.engine || 'browser'),
-    gender: (!raw || isVv) ? (prev.gender || 'auto') : val,
+    engine: raw ? kind : (prev.engine || 'browser'),
+    gender: (!raw || isVv || isAz) ? (prev.gender || 'auto') : val,
     voicevoxSpeaker: (raw && isVv) ? parseInt(val, 10) : (prev.voicevoxSpeaker != null ? prev.voicevoxSpeaker : 3),
+    azureVoice: (raw && isAz) ? val : (prev.azureVoice || 'ja-JP-NanamiNeural'),
     pitch: parseFloat(document.getElementById('ttsPitch').value),
     rate: parseFloat(document.getElementById('ttsRate').value),
     volume: parseFloat(document.getElementById('ttsVolume').value)
@@ -568,18 +570,40 @@ function bindTts() {
   });
 }
 
-// ---- 「声」の一覧 (端末内蔵 + VOICEVOXのキャラを1つのセレクトにまとめる) ----
+// ---- 「声」の一覧 (端末内蔵 + Azure + VOICEVOX を1つのセレクトにまとめる) ----
 let voiceLoaded = false;
 async function loadVoiceOptions() {
   const sel = document.getElementById('ttsVoice');
   const st = document.getElementById('ttsVoiceStatus');
-  // 端末内蔵の3つは常に選べる(VOICEVOXが無くても読み上げは動く)
+  const t = appConfig.tts || {};
+  const note = [];
+  // 端末内蔵の3つは常に選べる(サーバー合成が使えなくても読み上げは動く)
   let html = '<optgroup label="端末内蔵（遅延なし）">'
     + '<option value="browser:auto">自動</option>'
     + '<option value="browser:female">女性</option>'
     + '<option value="browser:male">男性</option>'
     + '</optgroup>';
-  st.textContent = 'VOICEVOX 確認中…';
+  st.style.color = 'var(--sub)';
+  st.textContent = '音声一覧を確認中…';
+
+  // Azure Speech (クラウド。速い)
+  try {
+    const r = await fetch(B + '/tts/azure-voices');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    html += '<optgroup label="Azure（クラウド・高速）">'
+      + d.voices.map(v => `<option value="azure:${esc(v.id)}">${esc(v.name)}${v.gender ? '（' + esc(v.gender) + '）' : ''}</option>`).join('')
+      + '</optgroup>';
+    note.push(`Azure ${d.voices.length}音声`);
+  } catch (e) {
+    note.push('Azure 未設定');
+    // 設定中の声は消さない(一時的な障害で設定が内蔵に戻ってしまわないように)
+    if (t.engine === 'azure' && t.azureVoice) {
+      html += `<optgroup label="Azure（いま利用不可）"><option value="azure:${esc(t.azureVoice)}">設定中の声（${esc(t.azureVoice)}）</option></optgroup>`;
+    }
+  }
+
+  // VOICEVOX (自前サーバー。キャラ音声だがCPU負荷が高い)
   try {
     const r = await fetch(B + '/tts/speakers');
     const d = await r.json();
@@ -588,22 +612,16 @@ async function loadVoiceOptions() {
       `<optgroup label="VOICEVOX ／ ${esc(s.name)}">` +
       s.styles.map(v => `<option value="voicevox:${v.id}">${esc(s.name)}（${esc(v.name)}）</option>`).join('') +
       '</optgroup>').join('');
-    const styles = d.reduce((n, s) => n + s.styles.length, 0);
-    st.style.color = 'var(--ok)';
-    st.textContent = `✓ VOICEVOX ${d.length}キャラ / ${styles}スタイル`;
+    note.push(`VOICEVOX ${d.length}キャラ`);
   } catch (e) {
-    // エンジンが居ない時は内蔵だけ出す。エラーで画面が壊れないようにする
-    st.style.color = 'var(--sub)';
-    st.textContent = 'VOICEVOX 未接続（端末内蔵のみ）';
-    st.title = e.message;
-    // VOICEVOXを選んで運用中なら、その選択を残しておく。
-    // 消してしまうと、エンジンが一時的に落ちている間に設定を触っただけで内蔵に戻ってしまう
-    const t = appConfig.tts || {};
+    note.push('VOICEVOX 未接続');
     if (t.engine === 'voicevox' && t.voicevoxSpeaker != null) {
       html += `<optgroup label="VOICEVOX（いま未接続）">`
         + `<option value="voicevox:${t.voicevoxSpeaker}">設定中の話者（ID ${t.voicevoxSpeaker}）</option></optgroup>`;
     }
   }
+
+  st.textContent = note.join(' / ');
   sel.innerHTML = html;
   selectCurrentVoice();
   refreshVoicevox(); // 起動ボタンの表示と状態を合わせる
@@ -613,17 +631,19 @@ function selectCurrentVoice() {
   const t = appConfig.tts || {};
   const sel = document.getElementById('ttsVoice');
   if (!sel.options.length) return;
-  sel.value = t.engine === 'voicevox'
-    ? 'voicevox:' + (t.voicevoxSpeaker != null ? t.voicevoxSpeaker : 3)
-    : 'browser:' + (t.gender || 'auto');
-  // 保存済みの話者がエンジンに無い / VOICEVOX未接続の場合は内蔵に落とす
+  if (t.engine === 'azure') sel.value = 'azure:' + (t.azureVoice || 'ja-JP-NanamiNeural');
+  else if (t.engine === 'voicevox') sel.value = 'voicevox:' + (t.voicevoxSpeaker != null ? t.voicevoxSpeaker : 3);
+  else sel.value = 'browser:' + (t.gender || 'auto');
+  // 保存済みの声が一覧に無い場合は内蔵に落とす
   if (sel.value === '') sel.value = 'browser:' + (t.gender || 'auto');
   if (sel.value === '') sel.selectedIndex = 0;
 }
 // 選ばれている声で試聴する
 function previewVoice() {
   const raw = document.getElementById('ttsVoice').value || '';
-  if (raw.indexOf('voicevox:') === 0) previewVoicevox(raw.split(':')[1]);
+  const val = raw.slice(raw.indexOf(':') + 1);
+  if (raw.indexOf('azure:') === 0) previewServerTts('voice=' + encodeURIComponent(val));
+  else if (raw.indexOf('voicevox:') === 0) previewServerTts('speaker=' + encodeURIComponent(val));
   else previewTts();
 }
 // ---- VOICEVOX ENGINE(Dockerコンテナ)の起動/停止 ----
@@ -697,10 +717,11 @@ async function vvStop() {
   } catch (e) { vvSetMsg('通信エラー: ' + e.message, 'var(--accent)'); }
   refreshVoicevox();
 }
-async function previewVoicevox(speakerId) {
+// サーバー合成(Azure/VOICEVOX)の試聴。query は voice=... または speaker=...
+async function previewServerTts(query) {
   saveTts(); // 今の高さ/速さ/音量を反映してから鳴らす
   try {
-    const r = await fetch(B + '/tts/preview?speaker=' + encodeURIComponent(speakerId));
+    const r = await fetch(B + '/tts/preview?' + query);
     if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || '合成に失敗しました'); return; }
     const a = new Audio(URL.createObjectURL(await r.blob()));
     a.play().catch(() => alert('この端末で音声を再生できませんでした'));

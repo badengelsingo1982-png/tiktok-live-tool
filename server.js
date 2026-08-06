@@ -18,6 +18,20 @@ const http = require('http');
 const { Server } = require('socket.io');
 const { TikTokLiveConnection, WebcastEvent } = require('tiktok-live-connector');
 
+// ---- .env の読み込み ----
+// APIキーなどを pm2 の環境変数に混ぜずに済ませるための最小実装。
+// 既に環境変数がある場合はそちらを優先する(pm2側の BASE_PATH 等を壊さない)
+try {
+    const envFile = path.join(__dirname, '.env');
+    if (fs.existsSync(envFile)) {
+        for (const line of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
+            const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+            if (!m || line.trim().startsWith('#')) continue;
+            if (!(m[1] in process.env)) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
+        }
+    }
+} catch (e) { console.error('[.env 読み込み失敗]', e.message); }
+
 // ---- 汎用: JSON読み書き ----
 function readJSON(p, fallback) {
     try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return fallback; }
@@ -125,8 +139,9 @@ function defaultConfig(username) {
     return {
         username: username || '',
         autoConnect: false,
-        // engine: 'browser'(端末内蔵) / 'voicevox'(サーバー合成)。voicevoxSpeaker はスタイルID(3=ずんだもん ノーマル)
-        tts: { enabled: true, readComments: true, readGifts: true, lang: 'ja-JP', rate: 1.1, maxLength: 60, gender: 'auto', pitch: 1, volume: 1, engine: 'browser', voicevoxSpeaker: 3 },
+        // engine: 'browser'(端末内蔵) / 'voicevox' / 'azure'(いずれもサーバー合成)
+        // voicevoxSpeaker はスタイルID(3=ずんだもん ノーマル)、azureVoice は音声名
+        tts: { enabled: true, readComments: true, readGifts: true, lang: 'ja-JP', rate: 1.1, maxLength: 60, gender: 'auto', pitch: 1, volume: 1, engine: 'browser', voicevoxSpeaker: 3, azureVoice: 'ja-JP-NanamiNeural' },
         alerts: {
             gift: { enabled: true, sound: '', minDiamonds: 1, duration: 6000 },
             follow: { enabled: true, sound: '', duration: 4000 },
@@ -554,12 +569,17 @@ router.post('/soundboard/rule', requireUser, (req, res) => {
 });
 
 // ============================================================
-// VOICEVOX (キャラ音声の読み上げ)
-// 別プロセスで動く VOICEVOX ENGINE に合成させ、出来たwavをディスクにキャッシュして返す。
-// エンジンが居なければエラーを返し、オーバーレイ側は端末内蔵の読み上げに切り替わる
+// サーバー側の読み上げ合成 (VOICEVOX / Azure Speech)
+// 合成した音声をディスクにキャッシュして返す。合成できなければエラーを返し、
+// オーバーレイ側は端末内蔵の読み上げに切り替わる
 // (= 導入前と同じ動作に戻るだけで、読み上げが止まることはない)
 // ============================================================
 const VOICEVOX_URL = (process.env.VOICEVOX_URL || 'http://127.0.0.1:50021').replace(/\/+$/, '');
+// Azure Speech。キーが未設定ならAzureは使えない状態として扱う
+const AZURE_KEY = process.env.AZURE_SPEECH_KEY || '';
+const AZURE_REGION = process.env.AZURE_SPEECH_REGION || 'japaneast';
+const AZURE_FORMAT = 'audio-24khz-48kbitrate-mono-mp3'; // mp3。wavの1/10の転送量で済む
+const AZURE_DEFAULT_VOICE = 'ja-JP-NanamiNeural';
 const TTS_CACHE_DIR = path.join(DATA_DIR, 'tts-cache');
 const TTS_TEXT_MAX = 120;      // 1回に合成する最大文字数
 const TTS_CACHE_MAX = 1000;    // キャッシュ保持数(超えたら古い順に削除)
@@ -572,17 +592,77 @@ function clampNum(v, min, max, dflt) {
     return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt;
 }
 
-// 端末内蔵TTS向けの設定値を VOICEVOX のパラメータに翻訳する。
-// rate 0.5〜2 → speedScale、pitch 0.5〜2 → pitchScale -0.15〜0.15 (VOICEVOXの可動域)
-function voicevoxParams(tts) {
+// 画面の設定値(rate/pitch/volume)を、選ばれたエンジンのパラメータに翻訳する。
+// VOICEVOX: pitch 0.5〜2 → pitchScale -0.15〜0.15 (VOICEVOXの可動域)
+// Azure   : SSMLのprosodyへ。rate/pitchは%指定、volumeは0〜100
+function ttsParams(tts) {
     const t = tts || {};
     const pitch = clampNum(t.pitch, 0.5, 2, 1);
+    const rate = clampNum(t.rate, 0.5, 2, 1);
+    const volume = clampNum(t.volume, 0, 2, 1);
+    const engine = t.engine === 'azure' ? 'azure' : 'voicevox';
     return {
+        engine,
+        // VOICEVOX用
         speaker: Math.max(0, parseInt(t.voicevoxSpeaker, 10) || 0),
-        speed: clampNum(t.rate, 0.5, 2, 1),
+        speed: rate,
         pitch: +((pitch - 1) * 0.15).toFixed(3),
-        volume: clampNum(t.volume, 0, 2, 1)
+        volume,
+        // Azure用
+        voice: /^[A-Za-z-]+Neural[A-Za-z]*$/.test(t.azureVoice || '') ? t.azureVoice : AZURE_DEFAULT_VOICE,
+        azRate: Math.round((rate - 1) * 100),   // 1.0 → 0%
+        azPitch: Math.round((pitch - 1) * 50),  // 1.0 → 0%
+        azVolume: Math.min(100, Math.round(volume * 100)) // AzureのSSMLは0〜100。超えると400になる
     };
+}
+
+const xmlEsc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' }[c]));
+
+// テキスト→mp3。Azure Speech の REST API を SSML で叩く
+async function azureSynth(text, p) {
+    if (!AZURE_KEY) throw new Error('AZURE_SPEECH_KEY が未設定です');
+    const sign = n => (n >= 0 ? '+' : '') + n + '%';
+    const ssml = `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="ja-JP">`
+        + `<voice name="${xmlEsc(p.voice)}">`
+        + `<prosody rate="${sign(p.azRate)}" pitch="${sign(p.azPitch)}" volume="${p.azVolume}">`
+        + xmlEsc(text) + `</prosody></voice></speak>`;
+    const r = await fetch(`https://${AZURE_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`, {
+        method: 'POST',
+        headers: {
+            'Ocp-Apim-Subscription-Key': AZURE_KEY,
+            'Content-Type': 'application/ssml+xml',
+            'X-Microsoft-OutputFormat': AZURE_FORMAT,
+            'User-Agent': 'tiktok-infinity'
+        },
+        body: ssml,
+        signal: AbortSignal.timeout(TTS_TIMEOUT_MS)
+    });
+    if (!r.ok) {
+        // 429 は無料枠(20回/60秒)の上限。オーバーレイ側は端末内蔵に落ちる
+        const detail = r.status === 429 ? 'リクエストが多すぎます(無料枠の上限)' : await r.text().catch(() => '');
+        throw new Error('Azure が ' + r.status + ' ' + String(detail).slice(0, 120));
+    }
+    return Buffer.from(await r.arrayBuffer());
+}
+
+// 日本語の音声一覧。毎回問い合わせると遅いのでプロセス内に覚えておく
+let azureVoiceCache = null;
+async function azureVoices() {
+    if (azureVoiceCache) return azureVoiceCache;
+    if (!AZURE_KEY) throw new Error('AZURE_SPEECH_KEY が未設定です');
+    const r = await fetch(`https://${AZURE_REGION}.tts.speech.microsoft.com/cognitiveservices/voices/list`, {
+        headers: { 'Ocp-Apim-Subscription-Key': AZURE_KEY }, signal: AbortSignal.timeout(TTS_TIMEOUT_MS)
+    });
+    if (!r.ok) throw new Error('音声一覧の取得に失敗: HTTP ' + r.status);
+    const all = await r.json();
+    azureVoiceCache = all
+        .filter(v => (v.Locale || '').toLowerCase().startsWith('ja-'))
+        .map(v => ({
+            id: v.ShortName,
+            name: v.LocalName || v.DisplayName || v.ShortName,
+            gender: v.Gender === 'Female' ? '女性' : v.Gender === 'Male' ? '男性' : ''
+        }));
+    return azureVoiceCache;
 }
 
 function voicevoxFetch(url, opts) {
@@ -605,10 +685,15 @@ async function voicevoxSynth(text, p) {
     return Buffer.from(await sr.arrayBuffer());
 }
 
+// キャッシュのキーは「エンジン+声+速さ/高さ/音量+本文」。どれかが変われば別ファイルになる
 function ttsCachePath(text, p) {
-    const h = crypto.createHash('sha1').update([p.speaker, p.speed, p.pitch, p.volume, text].join('')).digest('hex');
-    return path.join(TTS_CACHE_DIR, h + '.wav');
+    const seed = p.engine === 'azure'
+        ? ['azure', p.voice, p.azRate, p.azPitch, p.azVolume, text]
+        : ['voicevox', p.speaker, p.speed, p.pitch, p.volume, text];
+    const h = crypto.createHash('sha1').update(seed.join('|')).digest('hex');
+    return path.join(TTS_CACHE_DIR, h + (p.engine === 'azure' ? '.mp3' : '.wav'));
 }
+const ttsMime = p => (p.engine === 'azure' ? 'audio/mpeg' : 'audio/wav');
 
 // 古いキャッシュを間引く(更新時刻の古い順)。毎回走らせると重いので書き込み50回に1度
 let ttsWrites = 0;
@@ -625,7 +710,7 @@ function trimTtsCache() {
 
 // 同じ文言を同時に要求されても合成は1回で済ませる (ギフト定型文はほぼキャッシュに当たる)
 const ttsInflight = new Map();
-async function ttsWav(text, p) {
+async function ttsAudioFile(text, p) {
     const file = ttsCachePath(text, p);
     if (fs.existsSync(file)) {
         try { const now = new Date(); fs.utimesSync(file, now, now); } catch (e) {} // 間引きの順序用に触る
@@ -633,7 +718,7 @@ async function ttsWav(text, p) {
     }
     if (ttsInflight.has(file)) return ttsInflight.get(file);
     const job = (async () => {
-        const buf = await voicevoxSynth(text, p);
+        const buf = p.engine === 'azure' ? await azureSynth(text, p) : await voicevoxSynth(text, p);
         fs.writeFileSync(file, buf);
         trimTtsCache();
         return file;
@@ -675,16 +760,29 @@ router.get('/tts/speakers', requireUser, async (req, res) => {
     }
 });
 
-// ダッシュボードの試聴 (ログイン必須。話者だけ差し替えて自分の設定で鳴らす)
+// Azure の日本語音声一覧
+router.get('/tts/azure-voices', requireUser, async (req, res) => {
+    try {
+        res.json({ region: AZURE_REGION, voices: await azureVoices() });
+    } catch (e) {
+        res.status(503).json({ error: 'Azure Speech に接続できません: ' + e.message });
+    }
+});
+
+// ダッシュボードの試聴 (ログイン必須。声だけ差し替えて自分の設定で鳴らす)
 router.get('/tts/preview', requireUser, async (req, res) => {
     const t = getTenant(req.userKey);
     const text = (req.query.text || 'テスト読み上げです。ギフトありがとう!').toString().trim().slice(0, TTS_TEXT_MAX);
-    const p = voicevoxParams(t.config.tts);
-    if (req.query.speaker != null && req.query.speaker !== '') p.speaker = Math.max(0, parseInt(req.query.speaker, 10) || 0);
+    const p = ttsParams(t.config.tts);
+    // 保存前でも試聴できるよう、画面で選択中の声をクエリで受け取る
+    if (req.query.engine === 'azure' || req.query.voice) p.engine = 'azure';
+    if (req.query.engine === 'voicevox' || req.query.speaker) p.engine = 'voicevox';
+    if (req.query.speaker) p.speaker = Math.max(0, parseInt(req.query.speaker, 10) || 0);
+    if (req.query.voice) p.voice = ttsParams({ azureVoice: req.query.voice }).voice;
     try {
-        res.type('audio/wav').sendFile(await ttsWav(text, p));
+        res.type(ttsMime(p)).sendFile(await ttsAudioFile(text, p));
     } catch (e) {
-        res.status(503).json({ error: 'VOICEVOX 合成に失敗: ' + e.message });
+        res.status(503).json({ error: '合成に失敗: ' + e.message });
     }
 });
 
@@ -805,12 +903,13 @@ router.get('/tts', async (req, res) => {
     const text = (req.query.text || '').toString().trim().slice(0, TTS_TEXT_MAX);
     if (!text) return res.status(400).json({ error: 'text が必要です' });
     if (!ttsRateOk(key)) return res.status(429).json({ error: 'リクエストが多すぎます' });
+    const p = ttsParams(t.config.tts);
     try {
-        const file = await ttsWav(text, voicevoxParams(t.config.tts));
+        const file = await ttsAudioFile(text, p);
         res.set('Cache-Control', 'public, max-age=86400');
-        res.type('audio/wav').sendFile(file);
+        res.type(ttsMime(p)).sendFile(file);
     } catch (e) {
-        res.status(503).json({ error: 'VOICEVOX 合成に失敗: ' + e.message });
+        res.status(503).json({ error: '合成に失敗: ' + e.message });
     }
 });
 
@@ -1055,9 +1154,16 @@ server.listen(PORT, HOST, () => {
     console.log(`  Tiktok Infinity(マルチユーザー版) 起動 (${HOST}:${PORT})`);
     console.log(`  ユーザー数: ${Object.keys(users).length}`);
     console.log('==========================================');
-    // VOICEVOXの死活を起動時に一度だけ確認して知らせる(無くても動く)
+    // 読み上げエンジンの死活を起動時に一度だけ確認して知らせる(どちらも無くても動く)
     voicevoxFetch(VOICEVOX_URL + '/version')
         .then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)))
         .then(v => console.log(`  VOICEVOX ENGINE 検出: ${VOICEVOX_URL} (v${String(v).replace(/"/g, '')})`))
-        .catch(e => console.log(`  VOICEVOX ENGINE 未検出: ${VOICEVOX_URL} (${e.message}) → 端末内蔵の読み上げを使います`));
+        .catch(e => console.log(`  VOICEVOX ENGINE 未検出: ${VOICEVOX_URL} (${e.message})`));
+    if (!AZURE_KEY) {
+        console.log('  Azure Speech 未設定 (AZURE_SPEECH_KEY 未指定)');
+    } else {
+        azureVoices()
+            .then(v => console.log(`  Azure Speech 接続OK: ${AZURE_REGION} (日本語 ${v.length}音声)`))
+            .catch(e => console.log(`  Azure Speech 接続失敗: ${AZURE_REGION} (${e.message})`));
+    }
 });

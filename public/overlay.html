@@ -532,7 +532,8 @@ function playSound(url, fallbackFreq) {
 // 取得は並列・再生は直列にすることで、通信待ちを前の読み上げ時間に隠している
 const TTS_QUEUE_MAX = 5;   // 読み上げ待ちの上限(超えたら古い方から捨てる)
 const TTS_PREFETCH = 2;    // 何件先まで取りに行くか
-const TTS_FETCH_MS = 6000;    // サーバー合成の待ち上限。超えたら内蔵TTSで読む
+const TTS_FETCH_MS = 6000;       // VOICEVOX(自前サーバー)の待ち上限。超えたら内蔵TTSで読む
+const TTS_FETCH_AZURE_MS = 2500; // Azureの待ち上限。速いので短くしてある
 const TTS_PLAY_MAX_MS = 30000; // 1件の再生にかける上限。これを超えたら見切って次へ進む
 const ttsQueue = [];
 let speaking = false;
@@ -574,9 +575,15 @@ function speak(text) {
   processTts();
 }
 
-// VOICEVOXを使うか。ユーザー未指定(?u=なし)のときはサーバーに問い合わせられないので内蔵を使う
-function useVoicevox() {
-  return !!(config && config.tts && config.tts.engine === 'voicevox' && overlayUser);
+// サーバー合成(VOICEVOX/Azure)を使うか。
+// ユーザー未指定(?u=なし)のときはサーバーに問い合わせられないので内蔵を使う
+function useServerTts() {
+  const e = config && config.tts && config.tts.engine;
+  return !!((e === 'voicevox' || e === 'azure') && overlayUser);
+}
+// 合成の待ち上限。Azureは速いので短くし、遅い時は素早く内蔵へ逃がす
+function ttsFetchMs() {
+  return (config && config.tts && config.tts.engine === 'azure') ? TTS_FETCH_AZURE_MS : TTS_FETCH_MS;
 }
 // 取得済みBlobURLの後始末。捨てる時に呼ばないとメモリに残る
 function dropTtsItem(item) {
@@ -590,7 +597,7 @@ function clearTtsQueue() {
 // 先読み: 再生の完了を待たずに次の音声を取りに行く。
 // これで2件目以降の通信待ちは前の読み上げ時間に隠れ、体感の遅延がほぼ消える
 function prefetchTts() {
-  if (!useVoicevox()) return;
+  if (!useServerTts()) return;
   for (let i = 0; i < Math.min(TTS_PREFETCH, ttsQueue.length); i++) {
     const it = ttsQueue[i];
     if (!it.job) it.job = fetchTtsAudio(it.text);
@@ -599,12 +606,12 @@ function prefetchTts() {
 // サーバー(/tts)にwavを作らせて取得。失敗したらnullを返して内蔵TTSに委ねる
 function fetchTtsAudio(text) {
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), TTS_FETCH_MS);
+  const timer = setTimeout(() => ctl.abort(), ttsFetchMs());
   const url = B + '/tts?u=' + encodeURIComponent(overlayUser) + '&text=' + encodeURIComponent(text);
   return fetch(url, { signal: ctl.signal })
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
     .then(b => URL.createObjectURL(b))
-    .catch(e => { debugLog('VOICEVOX取得失敗(内蔵で読みます): ' + (e && e.message ? e.message : e)); return null; })
+    .catch(e => { debugLog('サーバー合成の取得失敗(内蔵で読みます): ' + (e && e.message ? e.message : e)); return null; })
     .finally(() => clearTimeout(timer));
 }
 // 取得済みwavを再生。終わったら(または鳴らせなかったら)必ず解決する
@@ -672,7 +679,7 @@ async function processTts() {
       const item = ttsQueue.shift();
       prefetchTts(); // 1件抜けた分、先の取得を進めておく
       let url = null;
-      if (useVoicevox()) url = await withTtsTimeout(item.job || fetchTtsAudio(item.text), TTS_FETCH_MS + 1000, '取得');
+      if (useServerTts()) url = await withTtsTimeout(item.job || fetchTtsAudio(item.text), ttsFetchMs() + 1000, '取得');
       if (url) await withTtsTimeout(playTtsAudio(url), TTS_PLAY_MAX_MS, '再生');
       else await withTtsTimeout(speakBrowser(item.text), TTS_PLAY_MAX_MS, '内蔵再生');
     }
