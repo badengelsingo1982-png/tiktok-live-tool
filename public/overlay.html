@@ -532,7 +532,8 @@ function playSound(url, fallbackFreq) {
 // 取得は並列・再生は直列にすることで、通信待ちを前の読み上げ時間に隠している
 const TTS_QUEUE_MAX = 5;   // 読み上げ待ちの上限(超えたら古い方から捨てる)
 const TTS_PREFETCH = 2;    // 何件先まで取りに行くか
-const TTS_FETCH_MS = 6000; // サーバー合成の待ち上限。超えたら内蔵TTSで読む
+const TTS_FETCH_MS = 6000;    // サーバー合成の待ち上限。超えたら内蔵TTSで読む
+const TTS_PLAY_MAX_MS = 30000; // 1件の再生にかける上限。これを超えたら見切って次へ進む
 const ttsQueue = [];
 let speaking = false;
 // 端末の音声一覧(男女の声選択に使用)。voiceschangedで更新
@@ -558,7 +559,9 @@ function pickVoice(lang, gender) {
 }
 function speak(text) {
   if (!config || !config.tts || !config.tts.enabled) return;
-  if (!isOBS && !audioActive) return; // 音声OFF中は読み上げない
+  // 音声OFF中は読み上げない。配信が未接続だと自動でOFFになる(他アプリの音を奪わないため)ので、
+  // 「読み上げされない」時はまずここを疑えるようログに残す
+  if (!isOBS && !audioActive) { debugLog('音声OFF中のため読み上げしない: ' + text); return; }
   const max = config.tts.maxLength || 60;
   ttsQueue.push({ text: String(text).slice(0, max) });
   // 溜まった分は古い方から捨てる。捨てないと盛り上がった時に
@@ -652,6 +655,14 @@ function speakBrowser(text) {
     } catch (e) { fin(); }
   });
 }
+// どの段階も必ず有限時間で返させる。1件でも返らないとキュー全体が止まり、
+// 以降まったく読み上げられなくなるため(取得ハング・onendedが来ない端末への保険)
+function withTtsTimeout(p, ms, label) {
+  return Promise.race([
+    Promise.resolve(p).catch(() => null),
+    new Promise(r => setTimeout(() => { debugLog('読み上げの' + label + 'が' + ms + 'ms応答せず、次へ進みます'); r(null); }, ms))
+  ]);
+}
 // 再生は常に1件ずつ(取得は prefetchTts が先回りしている)
 async function processTts() {
   if (speaking) return;
@@ -661,9 +672,9 @@ async function processTts() {
       const item = ttsQueue.shift();
       prefetchTts(); // 1件抜けた分、先の取得を進めておく
       let url = null;
-      if (useVoicevox()) url = await (item.job || fetchTtsAudio(item.text));
-      if (url) await playTtsAudio(url);
-      else await speakBrowser(item.text);
+      if (useVoicevox()) url = await withTtsTimeout(item.job || fetchTtsAudio(item.text), TTS_FETCH_MS + 1000, '取得');
+      if (url) await withTtsTimeout(playTtsAudio(url), TTS_PLAY_MAX_MS, '再生');
+      else await withTtsTimeout(speakBrowser(item.text), TTS_PLAY_MAX_MS, '内蔵再生');
     }
   } finally { speaking = false; }
 }
