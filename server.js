@@ -609,7 +609,9 @@ function ttsParams(tts) {
         pitch: +((pitch - 1) * 0.15).toFixed(3),
         volume,
         // Azure用
-        voice: /^[A-Za-z-]+Neural[A-Za-z]*$/.test(t.azureVoice || '') ? t.azureVoice : AZURE_DEFAULT_VOICE,
+        // 音声名は英数字と - _ : のみ許可。ja-JP-Haruto:MAI-Voice-2-Flash のように
+        // コロンや数字を含むものがあるため広めに取る(SSMLへはエスケープして埋め込む)
+        voice: /^[A-Za-z0-9:_-]{3,64}$/.test(t.azureVoice || '') ? t.azureVoice : AZURE_DEFAULT_VOICE,
         azRate: Math.round((rate - 1) * 100),   // 1.0 → 0%
         azPitch: Math.round((pitch - 1) * 50),  // 1.0 → 0%
         azVolume: Math.min(100, Math.round(volume * 100)) // AzureのSSMLは0〜100。超えると400になる
