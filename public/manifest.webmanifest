@@ -1,7 +1,7 @@
 {
-  "name": "TikTok LIVE ツール 管理画面",
-  "short_name": "LIVEツール",
-  "description": "TikTok LIVE 配信ツールの管理画面（接続・テスト・効果音・自動接続）",
+  "name": "Tiktok Infinity 管理画面",
+  "short_name": "Infinity",
+  "description": "Tiktok Infinity の管理画面（接続・テスト・効果音・自動接続）",
   "start_url": "dashboard",
   "scope": "./",
   "display": "standalone",

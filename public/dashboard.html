@@ -4,12 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow, noarchive">
-<title>TikTok LIVE ツール 管理画面</title>
+<title>Tiktok Infinity 管理画面</title>
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#0d1017">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="LIVEツール">
+<meta name="apple-mobile-web-app-title" content="Infinity">
 <style>
   :root {
     --bg: #0d1017; --panel: #161b26; --line: #262d3d;
@@ -51,6 +51,7 @@
   }
   button.ghost { background: transparent; border: 1px solid var(--line); color: var(--txt); }
   button:hover { opacity: 0.85; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
   .stats { display: flex; gap: 24px; margin-top: 14px; }
   .stat .v { font-size: 26px; font-weight: 800; }
   .stat .k { font-size: 12px; color: var(--sub); }
@@ -89,7 +90,7 @@
 </head>
 <body>
   <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:20px; flex-wrap:wrap">
-    <h1 style="margin:0">TikTok LIVE ツール <span class="dot">●</span> 管理画面</h1>
+    <h1 style="margin:0">Tiktok Infinity <span class="dot">●</span> 管理画面</h1>
     <div class="row" style="gap:10px">
       <span class="k" style="color:var(--sub)">👤 <b id="whoami" style="color:var(--txt)"></b></span>
       <button id="btnOverlay">🔊 オーバーレイへ</button>
@@ -170,12 +171,16 @@
       </div>
       <div class="row">
         <span style="width:96px">声</span>
-        <select id="ttsGender" class="soundsel" style="min-width:160px">
-          <option value="auto">自動</option>
-          <option value="female">女性</option>
-          <option value="male">男性</option>
-        </select>
-        <button class="ghost" onclick="previewTts()">▶ テスト読み上げ</button>
+        <select id="ttsVoice" class="soundsel" style="min-width:260px"></select>
+        <button class="ghost" onclick="previewVoice()">▶ 試聴</button>
+        <span id="ttsVoiceStatus" class="k" style="color:var(--sub)"></span>
+      </div>
+      <div class="row" id="vvRow" style="display:none">
+        <span style="width:96px">VOICEVOX</span>
+        <button class="ghost" id="btnVvStart" onclick="vvStart()">▶ 起動</button>
+        <button class="ghost" id="btnVvStop" onclick="vvStop()">■ 停止</button>
+        <button class="ghost" id="btnVvRefresh" onclick="refreshVoicevox()">↻ 状態を更新</button>
+        <span id="vvMsg" class="k" style="color:var(--sub)"></span>
       </div>
       <div class="row">
         <span style="width:96px">高さ</span>
@@ -193,7 +198,12 @@
         <span id="ttsVolumeVal" class="k" style="color:var(--sub); width:36px"></span>
       </div>
     </div>
-    <div class="hint">「声」で男女が切替できない端末（音声が1種類のみ）でも、「高さ」を上下すれば男女っぽく調整できます。テストは<b>この端末</b>の声で再生します（実際の声はオーバーレイ端末に依存）。</div>
+    <div class="hint">
+      「声」で<b>端末内蔵</b>（自動/女性/男性）と<b>VOICEVOXのキャラ</b>をまとめて選べます。「高さ」「速さ」「音量」はどちらにも反映されます。<br>
+      <b>端末内蔵</b>：オーバーレイ端末の音声で読み上げ。遅延ゼロですが、iPadのバックグラウンドで止まることがあります。試聴は<b>この端末</b>の声で鳴ります。<br>
+      <b>VOICEVOX</b>：サーバーで合成したキャラ音声。合成が間に合わない時だけ自動で端末内蔵に切り替わるので、読み上げが止まることはありません。<br>
+      ※ VOICEVOXのキャラを使う場合は<b>そのキャラ名でのクレジット表記が必須</b>です（例：概要欄に「VOICEVOX:四国めたん」）。キャラごとに利用規約が異なるので個別にご確認ください。
+    </div>
   </details>
 
   <details class="panel">
@@ -240,15 +250,15 @@
     </div>
 
     <div style="margin-top:16px">
-      <div class="k" style="color:var(--sub); margin-bottom:6px">② ギフトにサウンドを割り当て</div>
+      <div class="k" style="color:var(--sub); margin-bottom:6px">② ギフトにサウンドを割り当て <span id="ruleCount" style="margin-left:4px"></span></div>
       <div class="row">
-        <select id="ruleGift" class="soundsel" style="min-width:180px"></select>
+        <select id="ruleGift" class="soundsel" style="min-width:180px" onchange="updateRuleLimitUI()"></select>
         <span style="color:var(--sub)">→</span>
         <select id="ruleSound" style="background:#0a0d13; border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:10px 12px"></select>
-        <button onclick="addRule()">割当</button>
+        <button id="btnAddRule" onclick="addRule()">割当</button>
       </div>
       <div id="ruleList" style="margin-top:10px; display:flex; flex-direction:column; gap:6px"></div>
-      <div class="hint">ギフトは一覧から選択します（定番ギフト＋実際に届いたギフトを自動追加）。割当が無いギフトは既定のギフト音が鳴ります。</div>
+      <div class="hint">ギフトは一覧から選択します（定番ギフト＋実際に届いたギフトを自動追加）。割当が無いギフトは既定のギフト音が鳴ります。最大50個まで登録できます（同じギフトの音を変えるだけなら件数は増えません）。</div>
     </div>
   </details>
 
@@ -514,24 +524,34 @@ function renderTts() {
   chk('ttsEnabled', t.enabled);
   chk('ttsReadComments', t.readComments);
   chk('ttsReadGifts', t.readGifts);
-  set('ttsGender', t.gender || 'auto');
   set('ttsPitch', t.pitch != null ? t.pitch : 1);
   set('ttsRate', t.rate != null ? t.rate : 1.1);
   set('ttsVolume', t.volume != null ? t.volume : 1);
   updateTtsLabels();
   if (!ttsBound) { bindTts(); ttsBound = true; }
+  // 声の一覧は初回だけ取りに行き、以降は選択状態を合わせ直すだけ
+  if (!voiceLoaded) { voiceLoaded = true; loadVoiceOptions(); }
+  else selectCurrentVoice();
 }
 function updateTtsLabels() {
   const g = (id, o) => { const el = document.getElementById(id), ov = document.getElementById(o); if (el && ov) ov.textContent = el.value; };
   g('ttsPitch', 'ttsPitchVal'); g('ttsRate', 'ttsRateVal'); g('ttsVolume', 'ttsVolumeVal');
 }
 function currentTts() {
+  const prev = appConfig.tts || {};
+  // 「声」セレクトの値は "browser:auto" / "voicevox:3" の形。
+  // 一覧の取得前は空なので、その時は保存済みの設定をそのまま使う(勝手に上書きしない)
+  const raw = (document.getElementById('ttsVoice').value || '');
+  const [kind, val] = raw.split(':');
+  const isVv = kind === 'voicevox';
   return {
-    ...(appConfig.tts || {}),
+    ...prev,
     enabled: document.getElementById('ttsEnabled').checked,
     readComments: document.getElementById('ttsReadComments').checked,
     readGifts: document.getElementById('ttsReadGifts').checked,
-    gender: document.getElementById('ttsGender').value,
+    engine: raw ? (isVv ? 'voicevox' : 'browser') : (prev.engine || 'browser'),
+    gender: (!raw || isVv) ? (prev.gender || 'auto') : val,
+    voicevoxSpeaker: (raw && isVv) ? parseInt(val, 10) : (prev.voicevoxSpeaker != null ? prev.voicevoxSpeaker : 3),
     pitch: parseFloat(document.getElementById('ttsPitch').value),
     rate: parseFloat(document.getElementById('ttsRate').value),
     volume: parseFloat(document.getElementById('ttsVolume').value)
@@ -539,13 +559,152 @@ function currentTts() {
 }
 function saveTts() { const tts = currentTts(); appConfig.tts = tts; patchConfig({ tts }); }
 function bindTts() {
-  ['ttsEnabled', 'ttsReadComments', 'ttsReadGifts', 'ttsGender'].forEach(id =>
+  ['ttsEnabled', 'ttsReadComments', 'ttsReadGifts', 'ttsVoice'].forEach(id =>
     document.getElementById(id).addEventListener('change', saveTts));
   ['ttsPitch', 'ttsRate', 'ttsVolume'].forEach(id => {
     const el = document.getElementById(id);
     el.addEventListener('input', updateTtsLabels);
     el.addEventListener('change', saveTts); // 離した時に保存(スライダー連打で叩きすぎない)
   });
+}
+
+// ---- 「声」の一覧 (端末内蔵 + VOICEVOXのキャラを1つのセレクトにまとめる) ----
+let voiceLoaded = false;
+async function loadVoiceOptions() {
+  const sel = document.getElementById('ttsVoice');
+  const st = document.getElementById('ttsVoiceStatus');
+  // 端末内蔵の3つは常に選べる(VOICEVOXが無くても読み上げは動く)
+  let html = '<optgroup label="端末内蔵（遅延なし）">'
+    + '<option value="browser:auto">自動</option>'
+    + '<option value="browser:female">女性</option>'
+    + '<option value="browser:male">男性</option>'
+    + '</optgroup>';
+  st.textContent = 'VOICEVOX 確認中…';
+  try {
+    const r = await fetch(B + '/tts/speakers');
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+    html += d.map(s =>
+      `<optgroup label="VOICEVOX ／ ${esc(s.name)}">` +
+      s.styles.map(v => `<option value="voicevox:${v.id}">${esc(s.name)}（${esc(v.name)}）</option>`).join('') +
+      '</optgroup>').join('');
+    const styles = d.reduce((n, s) => n + s.styles.length, 0);
+    st.style.color = 'var(--ok)';
+    st.textContent = `✓ VOICEVOX ${d.length}キャラ / ${styles}スタイル`;
+  } catch (e) {
+    // エンジンが居ない時は内蔵だけ出す。エラーで画面が壊れないようにする
+    st.style.color = 'var(--sub)';
+    st.textContent = 'VOICEVOX 未接続（端末内蔵のみ）';
+    st.title = e.message;
+    // VOICEVOXを選んで運用中なら、その選択を残しておく。
+    // 消してしまうと、エンジンが一時的に落ちている間に設定を触っただけで内蔵に戻ってしまう
+    const t = appConfig.tts || {};
+    if (t.engine === 'voicevox' && t.voicevoxSpeaker != null) {
+      html += `<optgroup label="VOICEVOX（いま未接続）">`
+        + `<option value="voicevox:${t.voicevoxSpeaker}">設定中の話者（ID ${t.voicevoxSpeaker}）</option></optgroup>`;
+    }
+  }
+  sel.innerHTML = html;
+  selectCurrentVoice();
+  refreshVoicevox(); // 起動ボタンの表示と状態を合わせる
+}
+// 保存済み設定に合わせてセレクトの選択位置を復元する
+function selectCurrentVoice() {
+  const t = appConfig.tts || {};
+  const sel = document.getElementById('ttsVoice');
+  if (!sel.options.length) return;
+  sel.value = t.engine === 'voicevox'
+    ? 'voicevox:' + (t.voicevoxSpeaker != null ? t.voicevoxSpeaker : 3)
+    : 'browser:' + (t.gender || 'auto');
+  // 保存済みの話者がエンジンに無い / VOICEVOX未接続の場合は内蔵に落とす
+  if (sel.value === '') sel.value = 'browser:' + (t.gender || 'auto');
+  if (sel.value === '') sel.selectedIndex = 0;
+}
+// 選ばれている声で試聴する
+function previewVoice() {
+  const raw = document.getElementById('ttsVoice').value || '';
+  if (raw.indexOf('voicevox:') === 0) previewVoicevox(raw.split(':')[1]);
+  else previewTts();
+}
+// ---- VOICEVOX ENGINE(Dockerコンテナ)の起動/停止 ----
+// SSHに入らずここから起動できるようにする。操作は管理者のみ
+let vvPolling = false;
+function vvSetMsg(text, color) {
+  const el = document.getElementById('vvMsg');
+  el.textContent = text;
+  el.style.color = color || 'var(--sub)';
+}
+function vvApplyState(s) {
+  const start = document.getElementById('btnVvStart');
+  const stop = document.getElementById('btnVvStop');
+  const busy = s.job.running;
+  start.disabled = busy || s.engine.available;
+  stop.disabled = busy || !s.docker.running;
+  if (busy) { vvSetMsg('⏳ ' + (s.job.phase || '処理中…')); return; }
+  if (s.engine.available) { vvSetMsg('✓ 起動中（v' + (s.engine.version || '?') + '）', 'var(--ok)'); return; }
+  if (s.job.error) { vvSetMsg('✗ ' + s.job.error, 'var(--accent)'); return; }
+  if (!s.docker.available) { vvSetMsg('Dockerが使えません: ' + (s.docker.error || ''), 'var(--accent)'); return; }
+  vvSetMsg(s.docker.exists ? '停止中（「▶ 起動」で開始）' : '未インストール（「▶ 起動」で取得・開始。初回は数分）');
+}
+async function refreshVoicevox() {
+  try {
+    const r = await fetch(B + '/voicevox/state');
+    if (!r.ok) return;
+    const s = await r.json();
+    // 操作ボタンは管理者にだけ出す(APIも管理者限定)
+    document.getElementById('vvRow').style.display = s.canControl ? '' : 'none';
+    if (!s.canControl) return;
+    vvApplyState(s);
+    // 起動処理中は終わるまで見張り、終わったら声の一覧を取り直す
+    if (s.job.running && !vvPolling) pollVoicevox();
+    return s;
+  } catch (e) {}
+}
+async function pollVoicevox() {
+  vvPolling = true;
+  try {
+    for (;;) {
+      await new Promise(r => setTimeout(r, 2000));
+      const r = await fetch(B + '/voicevox/state');
+      if (!r.ok) break;
+      const s = await r.json();
+      vvApplyState(s);
+      if (!s.job.running) {
+        if (s.engine.available) { voiceLoaded = true; await loadVoiceOptions(); } // キャラ一覧を読み直す
+        break;
+      }
+    }
+  } catch (e) { vvSetMsg('状態の取得に失敗しました', 'var(--accent)'); }
+  finally { vvPolling = false; }
+}
+async function vvStart() {
+  document.getElementById('btnVvStart').disabled = true;
+  vvSetMsg('⏳ 起動を開始しています…');
+  try {
+    const r = await fetch(B + '/voicevox/start', { method: 'POST' });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); vvSetMsg('✗ ' + (d.error || '起動に失敗しました'), 'var(--accent)'); return; }
+    pollVoicevox();
+  } catch (e) { vvSetMsg('通信エラー: ' + e.message, 'var(--accent)'); }
+}
+async function vvStop() {
+  if (!confirm('VOICEVOX ENGINE を停止します。よろしいですか?\n(停止中は端末内蔵の読み上げに切り替わります)')) return;
+  document.getElementById('btnVvStop').disabled = true;
+  vvSetMsg('⏳ 停止しています…');
+  try {
+    const r = await fetch(B + '/voicevox/stop', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) vvSetMsg('✗ ' + (d.error || '停止に失敗しました'), 'var(--accent)');
+  } catch (e) { vvSetMsg('通信エラー: ' + e.message, 'var(--accent)'); }
+  refreshVoicevox();
+}
+async function previewVoicevox(speakerId) {
+  saveTts(); // 今の高さ/速さ/音量を反映してから鳴らす
+  try {
+    const r = await fetch(B + '/tts/preview?speaker=' + encodeURIComponent(speakerId));
+    if (!r.ok) { const d = await r.json().catch(() => ({})); alert(d.error || '合成に失敗しました'); return; }
+    const a = new Audio(URL.createObjectURL(await r.blob()));
+    a.play().catch(() => alert('この端末で音声を再生できませんでした'));
+  } catch (e) { alert('通信エラー: ' + e.message); }
 }
 function previewTts() {
   const t = currentTts();
@@ -610,6 +769,8 @@ function bindEq() {
 }
 
 // ---- サウンドボード（ギフト別サウンド）----
+// ギフト割当の上限。server.js の MAX_GIFT_RULES と揃えること
+const MAX_GIFT_RULES = 50;
 let soundboard = { library: [], giftRules: [] };
 let giftCatalog = [];
 const seenGifts = new Set();
@@ -641,6 +802,26 @@ function renderGiftOptions() {
     ? sorted.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')
     : '<option value="">(ギフト履歴なし)</option>';
   if (cur && sorted.includes(cur)) sel.value = cur;
+  updateRuleLimitUI();
+}
+
+// 割当の残り枠を表示し、上限に達したら「割当」を止める。
+// 既に割当済みのギフトは音の差し替えなので、上限でも操作できるようにしておく
+function updateRuleLimitUI() {
+  const n = soundboard.giftRules.length;
+  const cnt = document.getElementById('ruleCount');
+  if (cnt) {
+    cnt.textContent = `${n} / ${MAX_GIFT_RULES}`;
+    cnt.style.color = n >= MAX_GIFT_RULES ? 'var(--accent)' : 'var(--sub)';
+  }
+  const btn = document.getElementById('btnAddRule');
+  const sel = document.getElementById('ruleGift');
+  if (!btn || !sel) return;
+  const gift = (sel.value || '').trim().toLowerCase();
+  const isNew = !soundboard.giftRules.some(r => (r.gift || '').toLowerCase() === gift);
+  const full = isNew && n >= MAX_GIFT_RULES;
+  btn.disabled = full;
+  btn.title = full ? `割当は${MAX_GIFT_RULES}個までです。不要な割当を解除してください` : '';
 }
 
 function renderSoundboard() {
@@ -683,6 +864,7 @@ function renderSoundboard() {
       rl.appendChild(row);
     });
   }
+  updateRuleLimitUI();
 }
 
 // ---- サウンド追加ポップアップ ----
@@ -787,12 +969,20 @@ async function addRule() {
   const soundId = document.getElementById('ruleSound').value;
   if (!gift) { alert('ギフト名を入力してください'); return; }
   if (!soundId) { alert('先にライブラリへサウンドを追加してください'); return; }
+  const isNew = !soundboard.giftRules.some(r => (r.gift || '').toLowerCase() === gift.toLowerCase());
+  if (isNew && soundboard.giftRules.length >= MAX_GIFT_RULES) {
+    alert(`割当は${MAX_GIFT_RULES}個までです。不要な割当を解除してから追加してください`);
+    return;
+  }
   try {
     const res = await fetch(B + '/soundboard/rule', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ gift, soundId })
     });
-    if (!res.ok) alert('割当失敗');
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      alert(d.error || '割当失敗');
+    }
   } catch (e) { alert('通信エラー: ' + e.message); }
 }
 async function removeRule(gift) {

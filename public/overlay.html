@@ -4,13 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex, nofollow, noarchive">
-<title>Overlay</title>
+<title>Tiktok Infinity Overlay</title>
 <!-- PWA: 2台目端末でホーム画面アプリ化(全画面・前面運用向け)。OBSでは無視される -->
 <link rel="manifest" href="overlay.webmanifest">
 <meta name="theme-color" content="#000000">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
-<meta name="apple-mobile-web-app-title" content="LIVE通知">
+<meta name="apple-mobile-web-app-title" content="Infinity通知">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
 <style>
   /* OBSブラウザソース用: 背景は完全透過 */
@@ -190,6 +190,10 @@ const SILENT_WAV = 'data:audio/wav;base64,UklGRuwAAABXQVZFZm10IBAAAAABAAEAQB8AAE
 // mp3再生用の使い回しAudio要素(iOSはこの1要素をジェスチャ内でアンロックすれば以降再生可能)
 const sfx = new Audio();
 sfx.preload = 'auto';
+// VOICEVOXの読み上げ再生用。効果音と食い合わないよう sfx とは別要素にする。
+// iOSは要素ごとにアンロックが要るので unlockAudio() で一緒に鳴らしておく
+const ttsAudio = new Audio();
+ttsAudio.preload = 'auto';
 // 効果音の再生中は無音ループを止める(無音と効果音が重なってiOSで音が途切れるのを防ぐ)
 function sfxBusy() { return !!sfx.src && !sfx.paused && !sfx.ended; }
 sfx.addEventListener('playing', () => { stopKeepAlive(); });
@@ -277,7 +281,7 @@ let audioActive = false;
 function setupMediaSession() {
   if (!('mediaSession' in navigator)) return;
   try {
-    navigator.mediaSession.metadata = new MediaMetadata({ title: 'LIVEオーバーレイ', artist: '配信ツール' });
+    navigator.mediaSession.metadata = new MediaMetadata({ title: 'LIVEオーバーレイ', artist: 'Tiktok Infinity' });
     navigator.mediaSession.playbackState = 'playing';
     // コントロールセンターの停止/一時停止で本当に止まるようにする。
     // 以前は何もしないハンドラだったため、どこからも止められなかった
@@ -292,6 +296,7 @@ function stopAudioSession(why) {
   try { if (keepAlive) { keepAlive.pause(); keepAlive.currentTime = 0; } } catch (e) {}
   try { sfx.pause(); } catch (e) {}
   try { if (window.speechSynthesis) speechSynthesis.cancel(); } catch (e) {}
+  try { clearTtsQueue(); } catch (e) {} // 読み上げ待ちも破棄(再開時に古い分を喋り出さない)
   try { if (audioCtx && audioCtx.state === 'running') audioCtx.suspend(); } catch (e) {}
   try { if (navigator.mediaSession) { navigator.mediaSession.playbackState = 'none'; navigator.mediaSession.metadata = null; } } catch (e) {}
   try { if (wakeLock) { wakeLock.release(); wakeLock = null; } } catch (e) {}
@@ -408,6 +413,12 @@ function unlockAudio() {
     const p = sfx.play();
     if (p && p.then) p.then(() => { try { sfx.pause(); sfx.currentTime = 0; } catch (e) {} }).catch(() => {});
   } catch (e) {}
+  // VOICEVOX再生用の要素も同じタップでアンロックしておく(iOSは要素ごとに必要)
+  try {
+    ttsAudio.src = SILENT_WAV;
+    const pt = ttsAudio.play();
+    if (pt && pt.then) pt.then(() => { try { ttsAudio.pause(); ttsAudio.currentTime = 0; } catch (e) {} }).catch(() => {});
+  } catch (e) {}
   // TTS(speechSynthesis)も無音発話でウォームアップ
   try {
     if (window.speechSynthesis) {
@@ -517,6 +528,11 @@ function playSound(url, fallbackFreq) {
 }
 
 // ---- TTS (読み上げ) ----
+// engine が 'voicevox' ならサーバーでwavを作って再生し、失敗時は端末内蔵の読み上げに落ちる。
+// 取得は並列・再生は直列にすることで、通信待ちを前の読み上げ時間に隠している
+const TTS_QUEUE_MAX = 5;   // 読み上げ待ちの上限(超えたら古い方から捨てる)
+const TTS_PREFETCH = 2;    // 何件先まで取りに行くか
+const TTS_FETCH_MS = 6000; // サーバー合成の待ち上限。超えたら内蔵TTSで読む
 const ttsQueue = [];
 let speaking = false;
 // 端末の音声一覧(男女の声選択に使用)。voiceschangedで更新
@@ -544,25 +560,112 @@ function speak(text) {
   if (!config || !config.tts || !config.tts.enabled) return;
   if (!isOBS && !audioActive) return; // 音声OFF中は読み上げない
   const max = config.tts.maxLength || 60;
-  ttsQueue.push(text.slice(0, max));
+  ttsQueue.push({ text: String(text).slice(0, max) });
+  // 溜まった分は古い方から捨てる。捨てないと盛り上がった時に
+  // 「1分前のコメント」を読み続ける状態になり、体感の遅延が青天井になる
+  while (ttsQueue.length > TTS_QUEUE_MAX) {
+    dropTtsItem(ttsQueue.shift());
+    debugLog('読み上げが溜まったため古い分を破棄');
+  }
+  prefetchTts();
   processTts();
 }
-function processTts() {
-  if (speaking || ttsQueue.length === 0) return;
+
+// VOICEVOXを使うか。ユーザー未指定(?u=なし)のときはサーバーに問い合わせられないので内蔵を使う
+function useVoicevox() {
+  return !!(config && config.tts && config.tts.engine === 'voicevox' && overlayUser);
+}
+// 取得済みBlobURLの後始末。捨てる時に呼ばないとメモリに残る
+function dropTtsItem(item) {
+  if (!item || !item.job) return;
+  item.job.then(url => { if (url) { try { URL.revokeObjectURL(url); } catch (e) {} } }).catch(() => {});
+}
+function clearTtsQueue() {
+  while (ttsQueue.length) dropTtsItem(ttsQueue.shift());
+  try { ttsAudio.pause(); } catch (e) {}
+}
+// 先読み: 再生の完了を待たずに次の音声を取りに行く。
+// これで2件目以降の通信待ちは前の読み上げ時間に隠れ、体感の遅延がほぼ消える
+function prefetchTts() {
+  if (!useVoicevox()) return;
+  for (let i = 0; i < Math.min(TTS_PREFETCH, ttsQueue.length); i++) {
+    const it = ttsQueue[i];
+    if (!it.job) it.job = fetchTtsAudio(it.text);
+  }
+}
+// サーバー(/tts)にwavを作らせて取得。失敗したらnullを返して内蔵TTSに委ねる
+function fetchTtsAudio(text) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), TTS_FETCH_MS);
+  const url = B + '/tts?u=' + encodeURIComponent(overlayUser) + '&text=' + encodeURIComponent(text);
+  return fetch(url, { signal: ctl.signal })
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })
+    .then(b => URL.createObjectURL(b))
+    .catch(e => { debugLog('VOICEVOX取得失敗(内蔵で読みます): ' + (e && e.message ? e.message : e)); return null; })
+    .finally(() => clearTimeout(timer));
+}
+// 取得済みwavを再生。終わったら(または鳴らせなかったら)必ず解決する
+function playTtsAudio(url) {
+  return new Promise(resolve => {
+    let done = false;
+    const fin = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(guard);
+      try { URL.revokeObjectURL(url); } catch (e) {}
+      startKeepAlive(); // 無音ループを戻してオーディオセッションを維持
+      resolve();
+    };
+    // onendedが来ない端末でもキューが止まらないようにする保険
+    const guard = setTimeout(fin, 60000);
+    ttsAudio.onended = ttsAudio.onerror = ttsAudio.onpause = fin;
+    try {
+      stopKeepAlive(); // 無音ループと重ねるとiOSで音が途切れる
+      ttsAudio.src = url;
+      ttsAudio.load();
+      const p = ttsAudio.play();
+      if (p && p.catch) p.catch(err => { debugLog('TTS再生拒否: ' + (err && err.name ? err.name : err)); fin(); });
+    } catch (e) { fin(); }
+  });
+}
+// 端末内蔵の読み上げ(従来どおり)。VOICEVOX未使用時と、取得に失敗した時のフォールバック
+function speakBrowser(text) {
+  return new Promise(resolve => {
+    if (!window.speechSynthesis) { resolve(); return; }
+    let done = false;
+    const fin = () => { if (done) return; done = true; clearTimeout(guard); resolve(); };
+    const guard = setTimeout(fin, 60000);
+    try {
+      const t = config.tts || {};
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = (t.lang || 'ja-JP');
+      u.rate = t.rate || 1.0;
+      // 声の高さ: 明示指定があれば優先。無指定なら男=低め/女=高めの目安を自動適用
+      if (t.pitch != null && t.pitch !== '') u.pitch = +t.pitch;
+      else if (t.gender === 'male') u.pitch = 0.7;
+      else if (t.gender === 'female') u.pitch = 1.3;
+      if (t.volume != null && t.volume !== '') u.volume = +t.volume;
+      const v = pickVoice(u.lang, t.gender);
+      if (v) u.voice = v;
+      u.onend = u.onerror = fin;
+      speechSynthesis.speak(u);
+    } catch (e) { fin(); }
+  });
+}
+// 再生は常に1件ずつ(取得は prefetchTts が先回りしている)
+async function processTts() {
+  if (speaking) return;
   speaking = true;
-  const t = config.tts || {};
-  const u = new SpeechSynthesisUtterance(ttsQueue.shift());
-  u.lang = (t.lang || 'ja-JP');
-  u.rate = t.rate || 1.0;
-  // 声の高さ: 明示指定があれば優先。無指定なら男=低め/女=高めの目安を自動適用
-  if (t.pitch != null && t.pitch !== '') u.pitch = +t.pitch;
-  else if (t.gender === 'male') u.pitch = 0.7;
-  else if (t.gender === 'female') u.pitch = 1.3;
-  if (t.volume != null && t.volume !== '') u.volume = +t.volume;
-  const v = pickVoice(u.lang, t.gender);
-  if (v) u.voice = v;
-  u.onend = u.onerror = () => { speaking = false; processTts(); };
-  speechSynthesis.speak(u);
+  try {
+    while (ttsQueue.length) {
+      const item = ttsQueue.shift();
+      prefetchTts(); // 1件抜けた分、先の取得を進めておく
+      let url = null;
+      if (useVoicevox()) url = await (item.job || fetchTtsAudio(item.text));
+      if (url) await playTtsAudio(url);
+      else await speakBrowser(item.text);
+    }
+  } finally { speaking = false; }
 }
 
 // ---- アラート表示 ----

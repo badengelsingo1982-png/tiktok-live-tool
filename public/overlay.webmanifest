@@ -1,6 +1,6 @@
 {
-  "name": "LIVE通知オーバーレイ",
-  "short_name": "LIVE通知",
+  "name": "Tiktok Infinity 通知オーバーレイ",
+  "short_name": "Infinity通知",
   "description": "ギフト音・読み上げ・コメント表示（2台目端末での通知/サウンドボード用途にも）",
   "start_url": "overlay",
   "scope": "./",

@@ -1,5 +1,5 @@
 // ============================================================
-// TikTok LIVE 配信ツール (マルチユーザー版)
+// Tiktok Infinity (マルチユーザー版)
 // tiktok-live-connector v2 + Express + Socket.io
 // 起動: node server.js
 // ログイン : http://localhost:8181/login
@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
+const { execFile } = require('child_process'); // VOICEVOXコンテナの起動/停止に使用
 const multer = require('multer');
 const express = require('express');
 const http = require('http');
@@ -109,6 +110,8 @@ function cookieToken(cookieHeader) {
 // ============================================================
 const AUTO_RETRY_MS = 30000; // 配信待ちの再確認間隔 (30秒)
 const SOUND_TYPES = ['gift', 'follow', 'share'];
+// ギフト→サウンドの割当上限。変更したら dashboard.html の MAX_GIFT_RULES も揃えること
+const MAX_GIFT_RULES = 50;
 const DEFAULT_GIFTS = [
     'Rose', 'TikTok', 'Heart', 'Heart Me', 'GG', 'Ice Cream Cone', 'Finger Heart',
     'Perfume', 'Doughnut', 'Rosa', 'Love you', 'Hand Hearts', 'Sunglasses', 'Hi',
@@ -122,7 +125,8 @@ function defaultConfig(username) {
     return {
         username: username || '',
         autoConnect: false,
-        tts: { enabled: true, readComments: true, readGifts: true, lang: 'ja-JP', rate: 1.1, maxLength: 60, gender: 'auto', pitch: 1, volume: 1 },
+        // engine: 'browser'(端末内蔵) / 'voicevox'(サーバー合成)。voicevoxSpeaker はスタイルID(3=ずんだもん ノーマル)
+        tts: { enabled: true, readComments: true, readGifts: true, lang: 'ja-JP', rate: 1.1, maxLength: 60, gender: 'auto', pitch: 1, volume: 1, engine: 'browser', voicevoxSpeaker: 3 },
         alerts: {
             gift: { enabled: true, sound: '', minDiamonds: 1, duration: 6000 },
             follow: { enabled: true, sound: '', duration: 4000 },
@@ -448,8 +452,8 @@ router.get('/overlay.webmanifest', (req, res) => {
         const label = users[key] ? users[key].username : key;
         m.id = url;              // ユーザーごとに別アプリとしてインストールできるようにする
         m.start_url = url;
-        m.name = `LIVE通知オーバーレイ (${label})`;
-        m.short_name = `LIVE通知 ${label}`;
+        m.name = `Tiktok Infinity 通知オーバーレイ (${label})`;
+        m.short_name = `Infinity ${label}`;
     }
     res.set('Cache-Control', 'no-store');
     res.type('application/manifest+json').send(JSON.stringify(m));
@@ -531,17 +535,283 @@ router.delete('/soundboard/library/:id', requireUser, (req, res) => {
     res.json({ ok: true });
 });
 
-// ギフト→サウンドの割当
+// ギフト→サウンドの割当 (soundId空で解除)。上限 MAX_GIFT_RULES 件
 router.post('/soundboard/rule', requireUser, (req, res) => {
     const t = getTenant(req.userKey);
     const gift = (req.body.gift || '').toString().trim();
     const soundId = (req.body.soundId || '').toString().trim();
     if (!gift) return res.status(400).json({ error: 'ギフト名が必要です' });
-    t.soundboard.giftRules = t.soundboard.giftRules.filter(r => r.gift.toLowerCase() !== gift.toLowerCase());
+    // 既存ギフトの音を差し替えるだけなら件数は増えないので上限チェックの対象外
+    const isNew = !t.soundboard.giftRules.some(r => (r.gift || '').toLowerCase() === gift.toLowerCase());
+    if (soundId && isNew && t.soundboard.giftRules.length >= MAX_GIFT_RULES) {
+        return res.status(400).json({ error: `割当は${MAX_GIFT_RULES}個までです。不要な割当を解除してから追加してください`, max: MAX_GIFT_RULES });
+    }
+    t.soundboard.giftRules = t.soundboard.giftRules.filter(r => (r.gift || '').toLowerCase() !== gift.toLowerCase());
     if (soundId && t.soundboard.library.some(l => l.id === soundId)) t.soundboard.giftRules.push({ gift, soundId });
     saveTenantSoundboard(t);
     io.to(t.key).emit('soundboard', t.soundboard);
-    res.json({ ok: true, giftRules: t.soundboard.giftRules });
+    res.json({ ok: true, giftRules: t.soundboard.giftRules, max: MAX_GIFT_RULES });
+});
+
+// ============================================================
+// VOICEVOX (キャラ音声の読み上げ)
+// 別プロセスで動く VOICEVOX ENGINE に合成させ、出来たwavをディスクにキャッシュして返す。
+// エンジンが居なければエラーを返し、オーバーレイ側は端末内蔵の読み上げに切り替わる
+// (= 導入前と同じ動作に戻るだけで、読み上げが止まることはない)
+// ============================================================
+const VOICEVOX_URL = (process.env.VOICEVOX_URL || 'http://127.0.0.1:50021').replace(/\/+$/, '');
+const TTS_CACHE_DIR = path.join(DATA_DIR, 'tts-cache');
+const TTS_TEXT_MAX = 120;      // 1回に合成する最大文字数
+const TTS_CACHE_MAX = 1000;    // キャッシュ保持数(超えたら古い順に削除)
+const TTS_TIMEOUT_MS = 10000;  // エンジン応答の待ち上限
+const TTS_RATE_PER_MIN = 120;  // ユーザーごとの合成リクエスト上限/分
+try { fs.mkdirSync(TTS_CACHE_DIR, { recursive: true }); } catch (e) {}
+
+function clampNum(v, min, max, dflt) {
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : dflt;
+}
+
+// 端末内蔵TTS向けの設定値を VOICEVOX のパラメータに翻訳する。
+// rate 0.5〜2 → speedScale、pitch 0.5〜2 → pitchScale -0.15〜0.15 (VOICEVOXの可動域)
+function voicevoxParams(tts) {
+    const t = tts || {};
+    const pitch = clampNum(t.pitch, 0.5, 2, 1);
+    return {
+        speaker: Math.max(0, parseInt(t.voicevoxSpeaker, 10) || 0),
+        speed: clampNum(t.rate, 0.5, 2, 1),
+        pitch: +((pitch - 1) * 0.15).toFixed(3),
+        volume: clampNum(t.volume, 0, 2, 1)
+    };
+}
+
+function voicevoxFetch(url, opts) {
+    return fetch(url, Object.assign({ signal: AbortSignal.timeout(TTS_TIMEOUT_MS) }, opts || {}));
+}
+
+// テキスト→wav。VOICEVOXは audio_query でパラメータを作ってから synthesis に渡す2段構え
+async function voicevoxSynth(text, p) {
+    const qr = await voicevoxFetch(`${VOICEVOX_URL}/audio_query?text=${encodeURIComponent(text)}&speaker=${p.speaker}`, { method: 'POST' });
+    if (!qr.ok) throw new Error('audio_query が ' + qr.status);
+    const query = await qr.json();
+    query.speedScale = p.speed;
+    query.pitchScale = p.pitch;
+    query.volumeScale = p.volume;
+    query.outputStereo = false; // モノラルにして転送量を半分にする
+    const sr = await voicevoxFetch(`${VOICEVOX_URL}/synthesis?speaker=${p.speaker}&enable_interrogative_upspeak=true`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(query)
+    });
+    if (!sr.ok) throw new Error('synthesis が ' + sr.status);
+    return Buffer.from(await sr.arrayBuffer());
+}
+
+function ttsCachePath(text, p) {
+    const h = crypto.createHash('sha1').update([p.speaker, p.speed, p.pitch, p.volume, text].join('')).digest('hex');
+    return path.join(TTS_CACHE_DIR, h + '.wav');
+}
+
+// 古いキャッシュを間引く(更新時刻の古い順)。毎回走らせると重いので書き込み50回に1度
+let ttsWrites = 0;
+function trimTtsCache() {
+    if (++ttsWrites % 50 !== 0) return;
+    try {
+        const files = fs.readdirSync(TTS_CACHE_DIR)
+            .map(f => path.join(TTS_CACHE_DIR, f))
+            .map(f => ({ f, m: fs.statSync(f).mtimeMs }))
+            .sort((a, b) => a.m - b.m);
+        for (let i = 0; i < files.length - TTS_CACHE_MAX; i++) { try { fs.unlinkSync(files[i].f); } catch (e) {} }
+    } catch (e) {}
+}
+
+// 同じ文言を同時に要求されても合成は1回で済ませる (ギフト定型文はほぼキャッシュに当たる)
+const ttsInflight = new Map();
+async function ttsWav(text, p) {
+    const file = ttsCachePath(text, p);
+    if (fs.existsSync(file)) {
+        try { const now = new Date(); fs.utimesSync(file, now, now); } catch (e) {} // 間引きの順序用に触る
+        return file;
+    }
+    if (ttsInflight.has(file)) return ttsInflight.get(file);
+    const job = (async () => {
+        const buf = await voicevoxSynth(text, p);
+        fs.writeFileSync(file, buf);
+        trimTtsCache();
+        return file;
+    })();
+    ttsInflight.set(file, job);
+    try { return await job; } finally { ttsInflight.delete(file); }
+}
+
+// /tts は(オーバーレイが未ログインで開くため)認証なし。ユーザー単位で流量を絞る
+const ttsHits = new Map();
+function ttsRateOk(key) {
+    const now = Date.now();
+    const a = (ttsHits.get(key) || []).filter(t => now - t < 60000);
+    a.push(now);
+    ttsHits.set(key, a);
+    return a.length <= TTS_RATE_PER_MIN;
+}
+
+// エンジンの死活確認 (ダッシュボードの表示用)
+router.get('/tts/status', requireUser, async (req, res) => {
+    try {
+        const r = await voicevoxFetch(VOICEVOX_URL + '/version');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        res.json({ available: true, url: VOICEVOX_URL, version: (await r.text()).replace(/"/g, '') });
+    } catch (e) {
+        res.json({ available: false, url: VOICEVOX_URL, error: e.message });
+    }
+});
+
+// 話者(キャラ×スタイル)一覧
+router.get('/tts/speakers', requireUser, async (req, res) => {
+    try {
+        const r = await voicevoxFetch(VOICEVOX_URL + '/speakers');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const list = await r.json();
+        res.json(list.map(s => ({ name: s.name, styles: (s.styles || []).map(st => ({ id: st.id, name: st.name })) })));
+    } catch (e) {
+        res.status(503).json({ error: 'VOICEVOX ENGINE に接続できません (' + VOICEVOX_URL + '): ' + e.message });
+    }
+});
+
+// ダッシュボードの試聴 (ログイン必須。話者だけ差し替えて自分の設定で鳴らす)
+router.get('/tts/preview', requireUser, async (req, res) => {
+    const t = getTenant(req.userKey);
+    const text = (req.query.text || 'テスト読み上げです。ギフトありがとう!').toString().trim().slice(0, TTS_TEXT_MAX);
+    const p = voicevoxParams(t.config.tts);
+    if (req.query.speaker != null && req.query.speaker !== '') p.speaker = Math.max(0, parseInt(req.query.speaker, 10) || 0);
+    try {
+        res.type('audio/wav').sendFile(await ttsWav(text, p));
+    } catch (e) {
+        res.status(503).json({ error: 'VOICEVOX 合成に失敗: ' + e.message });
+    }
+});
+
+// ------------------------------------------------------------
+// VOICEVOX ENGINE の起動/停止 (Dockerコンテナの操作。管理者のみ)
+// SSHに入らずダッシュボードのボタンで起動できるようにするためのもの。
+// 実行するコマンドは固定で、画面からの入力は一切混ぜない
+// ------------------------------------------------------------
+const safeToken = s => /^[A-Za-z0-9][A-Za-z0-9._:\/-]*$/.test(s);
+const VOICEVOX_CONTAINER = safeToken(process.env.VOICEVOX_CONTAINER || '') ? process.env.VOICEVOX_CONTAINER : 'voicevox';
+const VOICEVOX_IMAGE = safeToken(process.env.VOICEVOX_IMAGE || '') ? process.env.VOICEVOX_IMAGE : 'voicevox/voicevox_engine:cpu-latest';
+const VOICEVOX_PORTMAP = '127.0.0.1:50021:50021'; // 外に晒さない。ここは固定
+
+function dockerCmd(args, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        execFile('docker', args, { timeout: timeoutMs || 60000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+            if (err) { err.stderr = String(stderr || ''); return reject(err); }
+            resolve(String(stdout || '').trim());
+        });
+    });
+}
+function dockerErr(e) {
+    if (e && e.code === 'ENOENT') return 'docker コマンドが見つかりません（このサーバーにDockerが入っていないか、実行権限がありません）';
+    if (e && e.killed) return 'docker コマンドがタイムアウトしました';
+    const s = ((e && e.stderr) || (e && e.message) || '').trim();
+    return s.slice(0, 300) || '不明なエラー';
+}
+
+// 起動処理の進捗。画面がポーリングして表示する
+const vvJob = { running: false, phase: '', log: [], error: '' };
+function vvLog(m) {
+    vvJob.phase = m;
+    vvJob.log.push(m);
+    if (vvJob.log.length > 50) vvJob.log.shift();
+    console.log('[VOICEVOX] ' + m);
+}
+
+async function voicevoxEnsureRunning() {
+    vvLog('Docker を確認しています');
+    await dockerCmd(['version', '--format', '{{.Server.Version}}'], 20000);
+    let state = null;
+    try { state = await dockerCmd(['inspect', '-f', '{{.State.Running}}', VOICEVOX_CONTAINER], 20000); } catch (e) { state = null; }
+    if (state === 'true') {
+        vvLog('コンテナはすでに動いています');
+    } else if (state === 'false') {
+        vvLog('停止していたコンテナを起動します');
+        await dockerCmd(['start', VOICEVOX_CONTAINER], 120000);
+    } else {
+        // 初回はイメージ取得に数分かかる。ここが一番時間を食う
+        vvLog('イメージを取得しています（初回は数分かかります）');
+        await dockerCmd(['pull', VOICEVOX_IMAGE], 1800000);
+        vvLog('コンテナを作成して起動します');
+        await dockerCmd(['run', '-d', '--restart', 'always', '--name', VOICEVOX_CONTAINER,
+            '-p', VOICEVOX_PORTMAP, VOICEVOX_IMAGE], 180000);
+    }
+    vvLog('エンジンの応答を待っています');
+    for (let i = 0; i < 60; i++) { // 最大約2分待つ(モデル読み込みに時間がかかる)
+        try {
+            const r = await voicevoxFetch(VOICEVOX_URL + '/version');
+            if (r.ok) return String(await r.text()).replace(/"/g, '');
+        } catch (e) {}
+        await new Promise(r => setTimeout(r, 2000));
+    }
+    throw new Error('コンテナは起動しましたが、エンジンが応答しません（' + VOICEVOX_URL + '）');
+}
+
+// エンジンとDockerの状態をまとめて返す
+router.get('/voicevox/state', requireUser, async (req, res) => {
+    const out = {
+        url: VOICEVOX_URL, container: VOICEVOX_CONTAINER, image: VOICEVOX_IMAGE,
+        engine: { available: false }, docker: { available: false, exists: false, running: false },
+        job: { running: vvJob.running, phase: vvJob.phase, error: vvJob.error },
+        canControl: !!(req.user && req.user.isAdmin)
+    };
+    try {
+        const r = await voicevoxFetch(VOICEVOX_URL + '/version');
+        if (r.ok) { out.engine.available = true; out.engine.version = String(await r.text()).replace(/"/g, ''); }
+    } catch (e) {}
+    try { await dockerCmd(['version', '--format', '{{.Server.Version}}'], 10000); out.docker.available = true; }
+    catch (e) { out.docker.error = dockerErr(e); }
+    if (out.docker.available) {
+        try {
+            const s = await dockerCmd(['inspect', '-f', '{{.State.Running}}', VOICEVOX_CONTAINER], 10000);
+            out.docker.exists = true;
+            out.docker.running = (s === 'true');
+        } catch (e) {} // コンテナ未作成。exists=false のまま
+    }
+    res.json(out);
+});
+
+// 起動。時間がかかるので即座に返し、進捗は /voicevox/state で拾わせる
+router.post('/voicevox/start', requireAdmin, (req, res) => {
+    if (vvJob.running) return res.status(409).json({ error: '起動処理を実行中です' });
+    vvJob.running = true; vvJob.error = ''; vvJob.log = []; vvJob.phase = '';
+    res.json({ ok: true });
+    voicevoxEnsureRunning()
+        .then(v => vvLog('起動しました（v' + v + '）'))
+        .catch(e => { vvJob.error = dockerErr(e); vvLog('失敗: ' + vvJob.error); })
+        .finally(() => { vvJob.running = false; });
+});
+
+router.post('/voicevox/stop', requireAdmin, async (req, res) => {
+    if (vvJob.running) return res.status(409).json({ error: '起動処理を実行中です' });
+    try {
+        await dockerCmd(['stop', VOICEVOX_CONTAINER], 120000);
+        vvLog('停止しました');
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ error: dockerErr(e) });
+    }
+});
+
+// 合成本体。オーバーレイは未ログインで開くので u= でユーザーを指定させる
+router.get('/tts', async (req, res) => {
+    const key = normKey(req.query.u);
+    const t = getTenant(key);
+    if (!t) return res.status(404).json({ error: 'ユーザーが見つかりません' });
+    const text = (req.query.text || '').toString().trim().slice(0, TTS_TEXT_MAX);
+    if (!text) return res.status(400).json({ error: 'text が必要です' });
+    if (!ttsRateOk(key)) return res.status(429).json({ error: 'リクエストが多すぎます' });
+    try {
+        const file = await ttsWav(text, voicevoxParams(t.config.tts));
+        res.set('Cache-Control', 'public, max-age=86400');
+        res.type('audio/wav').sendFile(file);
+    } catch (e) {
+        res.status(503).json({ error: 'VOICEVOX 合成に失敗: ' + e.message });
+    }
 });
 
 // ---- myinstants からサウンドを取得 ----
@@ -782,7 +1052,12 @@ const PORT = 8181;
 const HOST = process.env.BIND_HOST || '127.0.0.1';
 server.listen(PORT, HOST, () => {
     console.log('==========================================');
-    console.log(`  TikTok LIVE ツール(マルチユーザー版) 起動 (${HOST}:${PORT})`);
+    console.log(`  Tiktok Infinity(マルチユーザー版) 起動 (${HOST}:${PORT})`);
     console.log(`  ユーザー数: ${Object.keys(users).length}`);
     console.log('==========================================');
+    // VOICEVOXの死活を起動時に一度だけ確認して知らせる(無くても動く)
+    voicevoxFetch(VOICEVOX_URL + '/version')
+        .then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)))
+        .then(v => console.log(`  VOICEVOX ENGINE 検出: ${VOICEVOX_URL} (v${String(v).replace(/"/g, '')})`))
+        .catch(e => console.log(`  VOICEVOX ENGINE 未検出: ${VOICEVOX_URL} (${e.message}) → 端末内蔵の読み上げを使います`));
 });

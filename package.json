@@ -1,7 +1,8 @@
 {
-  "name": "tiktok-live-tool",
+  "name": "tiktok-infinity",
   "version": "1.0.0",
-  "description": "",
+  "description": "Tiktok Infinity",
+  "private": true,
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
