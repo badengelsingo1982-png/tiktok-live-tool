@@ -426,6 +426,7 @@ socket.on('config', c => {
   renderEq();
 });
 socket.on('status', s => {
+  if (s.connected) setConnecting(false);
   document.getElementById('badge').className = 'badge ' + (s.connected ? 'on' : 'off');
   document.getElementById('badge').textContent = s.connected ? '接続中 @' + s.username : '未接続';
   document.getElementById('stViewers').textContent = (s.viewers || 0).toLocaleString();
@@ -443,7 +444,7 @@ socket.on('event', ev => {
   else if (ev.type === 'share') body = `<span class="follow">🔁 <b>${esc(ev.nickname)}</b> がシェア</span>`;
   else if (ev.type === 'member') body = `<span style="color:var(--sub)">入室: ${esc(ev.nickname)}</span>`;
   else if (ev.type === 'like') return;
-  else if (ev.type === 'system') body = `<span class="system">⚙ ${esc(ev.message)}</span>`;
+  else if (ev.type === 'system') { setConnecting(false); body = `<span class="system">⚙ ${esc(ev.message)}</span>`; }
   else return;
   const div = document.createElement('div');
   div.innerHTML = `<span class="t">${t}</span>` + body;
@@ -452,10 +453,24 @@ socket.on('event', ev => {
   while (log.children.length > 200) log.removeChild(log.firstChild);
 });
 
-document.getElementById('btnConnect').onclick = () => {
+// 接続は数秒かかる。押しっぱなしに見えて連打されると接続が二重に張られるので、
+// 処理中はボタンを無効化して「接続中…」を出す(結果は status か system メッセージで届く)
+const btnConnect = document.getElementById('btnConnect');
+const CONNECT_LABEL = btnConnect.textContent;
+let connectTimer = null;
+function setConnecting(on) {
+  if (btnConnect.disabled === on) return;
+  btnConnect.disabled = on;
+  btnConnect.textContent = on ? '接続中…' : CONNECT_LABEL;
+  clearTimeout(connectTimer);
+  // 応答が来ないまま押せなくなるのを防ぐ保険
+  if (on) connectTimer = setTimeout(() => setConnecting(false), 30000);
+}
+btnConnect.onclick = () => {
   socket.emit('connectLive', document.getElementById('username').value);
+  setConnecting(true);
 };
-document.getElementById('btnDisconnect').onclick = () => socket.emit('disconnectLive');
+document.getElementById('btnDisconnect').onclick = () => { setConnecting(false); socket.emit('disconnectLive'); };
 function test(type) { socket.emit('test', type); }
 
 // 自動接続 ON/OFF

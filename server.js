@@ -162,7 +162,8 @@ function loadTenant(key) {
         soundboard: readJSON(path.join(userDir(key), 'soundboard.json'), { library: [], giftRules: [] }),
         giftCatalog: readJSON(path.join(userDir(key), 'gift-catalog.json'), []),
         status: { connected: false, username: '', viewers: 0, likes: 0, diamonds: 0 },
-        connection: null, connecting: false, autoTimer: null
+        // connGen: 接続のやり直しごとに進める世代番号。connectTikTok() を参照
+        connection: null, connecting: false, autoTimer: null, connGen: 0
     };
     if (!Array.isArray(t.soundboard.library)) t.soundboard.library = [];
     if (!Array.isArray(t.soundboard.giftRules)) t.soundboard.giftRules = [];
@@ -436,7 +437,8 @@ router.delete('/admin/users/:name', requireAdmin, (req, res) => {
     if (key === req.userKey) return res.status(400).json({ error: '自分自身は削除できません' });
     // 接続中なら切断
     const t = tenants.get(key);
-    if (t) { try { if (t.connection) t.connection.disconnect(); } catch (e) {} if (t.autoTimer) clearTimeout(t.autoTimer); tenants.delete(key); }
+    // disconnectTikTok は接続確立中のものも無効化する(単なる disconnect() では止まらない)
+    if (t) { cancelAutoRetry(t); disconnectTikTok(t); tenants.delete(key); }
     delete users[key]; saveUsers();
     try { fs.rmSync(userDir(key), { recursive: true, force: true }); } catch (e) {}
     res.json({ ok: true });
@@ -999,21 +1001,36 @@ async function maintainConnection(t) {
     await connectTikTok(t, t.config.username);
 }
 
+// 接続をやり直すたびに世代番号(connGen)を進める。
+// ライブラリの disconnect() は接続確立中(CONNECTING)の connect() を中断できないため、
+// 「接続中にもう一度接続」すると古い接続が後から確立し、どこからも参照されないまま
+// コメントを二重配信してしまう。世代が変わった接続は配信も状態更新も行わず、自分で切断する。
 async function connectTikTok(t, username) {
-    if (t.connection) { try { t.connection.disconnect(); } catch (e) {} t.connection = null; }
+    const gen = ++t.connGen;
+    const stale = () => t.connGen !== gen;
     t.connecting = true;
     t.status.username = username;
     console.log(`[${t.key}] 接続開始 @${username}`);
+
+    // 旧接続を畳む。確立済みならWSが閉じるまで待つ
+    if (t.connection) {
+        const old = t.connection;
+        t.connection = null;
+        try { await old.disconnect(); } catch (e) {}
+    }
+    if (stale()) return; // 待っている間にさらに新しい接続要求が来た。こちらは降りる
 
     const connection = new TikTokLiveConnection(username, { enableExtendedGiftInfo: false, processInitialData: false });
     t.connection = connection;
 
     connection.on(WebcastEvent.CHAT, data => {
+        if (stale()) return;
         const u = userInfo(data.user);
         const comment = data.comment ?? data.content ?? '';
         broadcast(t, 'chat', { ...u, comment });
     });
     connection.on(WebcastEvent.GIFT, data => {
+        if (stale()) return;
         const g = data.gift || {};
         const isStreakable = g.type === 1;
         if (isStreakable && data.repeatEnd !== 1) return;
@@ -1026,16 +1043,18 @@ async function connectTikTok(t, username) {
         broadcast(t, 'gift', { ...u, giftName: g.name || 'ギフト', giftImage, count, diamonds });
         pushStatus(t);
     });
-    connection.on(WebcastEvent.FOLLOW, data => broadcast(t, 'follow', userInfo(data.user)));
-    connection.on(WebcastEvent.SHARE, data => broadcast(t, 'share', userInfo(data.user)));
+    connection.on(WebcastEvent.FOLLOW, data => { if (stale()) return; broadcast(t, 'follow', userInfo(data.user)); });
+    connection.on(WebcastEvent.SHARE, data => { if (stale()) return; broadcast(t, 'share', userInfo(data.user)); });
     connection.on(WebcastEvent.LIKE, data => {
+        if (stale()) return;
         t.status.likes = data.totalCount || t.status.likes + (data.count || 1);
         broadcast(t, 'like', { ...userInfo(data.user), count: data.count || 1, total: t.status.likes });
         pushStatus(t);
     });
-    connection.on(WebcastEvent.MEMBER, data => broadcast(t, 'member', userInfo(data.user)));
-    connection.on(WebcastEvent.ROOM_USER, data => { t.status.viewers = data.viewerCount || 0; pushStatus(t); });
+    connection.on(WebcastEvent.MEMBER, data => { if (stale()) return; broadcast(t, 'member', userInfo(data.user)); });
+    connection.on(WebcastEvent.ROOM_USER, data => { if (stale()) return; t.status.viewers = data.viewerCount || 0; pushStatus(t); });
     connection.on(WebcastEvent.STREAM_END, () => {
+        if (stale()) return;
         t.status.connected = false; pushStatus(t);
         broadcast(t, 'system', { message: '配信が終了しました' });
         if (t.config.autoConnect) { broadcast(t, 'system', { message: '自動接続ON: 次の配信開始を待機します' }); scheduleAutoRetry(t); }
@@ -1044,11 +1063,18 @@ async function connectTikTok(t, username) {
 
     try {
         const state = await connection.connect();
+        if (stale()) {
+            // 待っている間に別の接続へ切り替わっていた。放置するとイベントを二重に受信するので確実に切る
+            console.log(`[${t.key}] 古い接続を破棄 roomId: ${state.roomId}`);
+            try { await connection.disconnect(); } catch (e) {}
+            return;
+        }
         t.status.connected = true;
         console.log(`[${t.key}] 接続成功 roomId: ${state.roomId}`);
         pushStatus(t);
         broadcast(t, 'system', { message: `@${username} のLIVEに接続しました` });
     } catch (err) {
+        if (stale()) return; // 古い接続の失敗で、現在の接続の状態を上書きしない
         t.status.connected = false;
         pushStatus(t);
         console.error(`[${t.key}] 接続失敗:`, err.message);
@@ -1058,10 +1084,16 @@ async function connectTikTok(t, username) {
         } else {
             broadcast(t, 'system', { message: `接続失敗: ${err.message}` });
         }
-    } finally { t.connecting = false; }
+    } finally { if (!stale()) t.connecting = false; } // 古い接続は新しい接続のフラグに触らない
 }
 function disconnectTikTok(t) {
-    if (t.connection) { try { t.connection.disconnect(); } catch (e) {} t.connection = null; }
+    t.connGen++; // 進行中の接続があれば無効化する(後から確立しても配信させない)
+    if (t.connection) {
+        const old = t.connection;
+        t.connection = null;
+        try { const p = old.disconnect(); if (p && p.catch) p.catch(() => {}); } catch (e) {}
+    }
+    t.connecting = false;
     t.status.connected = false;
     pushStatus(t);
     console.log(`[${t.key}] 切断`);
@@ -1103,6 +1135,12 @@ io.on('connection', socket => {
         saveTenantConfig(t);
         io.to(t.key).emit('config', t.config);
         cancelAutoRetry(t);
+        // 接続処理中の二重押し(または自動接続の再試行との衝突)は無視する。
+        // 別の配信者に切り替える場合は世代番号で古い接続が無効化されるのでそのまま進める
+        if (t.connecting && name === t.status.username) {
+            broadcast(t, 'system', { message: '接続処理中です。しばらくお待ちください' });
+            return;
+        }
         connectTikTok(t, name);
     });
     socket.on('disconnectLive', () => {
