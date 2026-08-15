@@ -207,6 +207,69 @@
   </details>
 
   <details class="panel">
+    <summary>自動返信 <span class="sub">コメントに反応して読み上げ</span></summary>
+    <div style="margin-top:12px; display:flex; flex-direction:column; gap:12px">
+      <div class="row">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
+          <input type="checkbox" id="arEnabled"> 自動返信を有効にする
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
+          <input type="checkbox" id="arShow"> オーバーレイにも表示する
+        </label>
+      </div>
+      <div class="row">
+        <span style="width:96px">動作テスト</span>
+        <input type="text" id="arTestComment" style="flex:1; min-width:180px" placeholder="テストしたいコメントを入力" value="こんにちは!">
+        <button class="ghost" onclick="test('reply', document.getElementById('arTestComment').value)">▶ 返信させる</button>
+      </div>
+
+      <div>
+        <div style="margin-bottom:6px; color:var(--sub)">定型ルール（上から順に照合。<code>{name}</code> は投稿者名に置き換わります）</div>
+        <div id="arRules" style="display:flex; flex-direction:column; gap:8px"></div>
+        <button class="ghost" style="margin-top:8px" onclick="addAutoReplyRule()">＋ ルールを追加</button>
+      </div>
+
+      <div class="row">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
+          <input type="checkbox" id="arAiEnabled"> どのルールにも当たらない時はAIが返信を作る
+        </label>
+      </div>
+      <div class="row">
+        <span style="width:96px">AIの性格</span>
+        <input type="text" id="arPersona" style="flex:1; min-width:220px" placeholder="例: 明るく元気な配信アシスタント。敬語は控えめ。">
+      </div>
+      <div class="row">
+        <span style="width:96px">返信の長さ</span>
+        <input type="number" id="arMaxLen" min="10" max="100" style="width:80px"> 文字以内
+        <span style="width:60px; margin-left:12px">モデル</span>
+        <select id="arModel">
+          <option value="claude-opus-5">Claude Opus 5（高品質）</option>
+          <option value="claude-sonnet-5">Claude Sonnet 5（速い・安い）</option>
+          <option value="claude-haiku-4-5">Claude Haiku 4.5（最速・最安）</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <span style="width:96px">返信の間隔</span>
+        <input type="number" id="arCooldown" min="0" max="300" style="width:70px"> 秒あける
+        <span style="margin-left:12px">同じ人には</span>
+        <input type="number" id="arUserCooldown" min="0" max="3600" style="width:70px"> 秒あける
+        <span style="margin-left:12px">1分あたり最大</span>
+        <input type="number" id="arMaxPerMin" min="1" max="60" style="width:70px"> 件
+      </div>
+
+      <div class="hint">
+        コメントに反応して<b>返信文を読み上げます</b>。TikTokのコメント欄には投稿しません（送信APIは有料プランと
+        アカウントのログイン情報が必要なため）。視聴者には配信の音声として届きます。<br>
+        <b>定型ルール</b>はキーワードを含むコメントに即座に反応します（カンマ区切りで複数指定可）。合成音声がキャッシュされるので2回目以降はほぼ即座に鳴ります。<br>
+        <b>AI返信</b>はルールに当たらなかったコメントだけが対象です。使うには<b>サーバーに <code>ANTHROPIC_API_KEY</code> の設定が必要</b>で、
+        生成に数秒かかり、コメント1件ごとにAPI料金がかかります。上の「返信の間隔」で件数を絞ってください。<br>
+        ※ 盛り上がった時に返信で読み上げが埋まらないよう、初めは間隔を長めにして様子を見ることをおすすめします。
+      </div>
+    </div>
+  </details>
+
+  <details class="panel">
     <summary>サウンド調整 <span class="sub">イコライザー</span></summary>
     <div style="margin-top:12px; display:flex; flex-direction:column; gap:12px">
       <div class="row">
@@ -424,6 +487,7 @@ socket.on('config', c => {
   renderAlertSelects();
   renderTts();
   renderEq();
+  renderAutoReply();
 });
 socket.on('status', s => {
   if (s.connected) setConnecting(false);
@@ -443,6 +507,7 @@ socket.on('event', ev => {
   else if (ev.type === 'follow') body = `<span class="follow">➕ <b>${esc(ev.nickname)}</b> がフォロー</span>`;
   else if (ev.type === 'share') body = `<span class="follow">🔁 <b>${esc(ev.nickname)}</b> がシェア</span>`;
   else if (ev.type === 'member') body = `<span style="color:var(--sub)">入室: ${esc(ev.nickname)}</span>`;
+  else if (ev.type === 'reply') body = `<span class="follow">🤖 ${esc(ev.nickname)}さんへ${ev.source === 'ai' ? '(AI)' : ''}: ${esc(ev.text)}</span>`;
   else if (ev.type === 'like') return;
   else if (ev.type === 'system') { setConnecting(false); body = `<span class="system">⚙ ${esc(ev.message)}</span>`; }
   else return;
@@ -471,7 +536,7 @@ btnConnect.onclick = () => {
   setConnecting(true);
 };
 document.getElementById('btnDisconnect').onclick = () => { setConnecting(false); socket.emit('disconnectLive'); };
-function test(type) { socket.emit('test', type); }
+function test(type, payload) { socket.emit('test', type, payload); }
 
 // 自動接続 ON/OFF
 document.getElementById('autoConnect').onchange = (e) => {
@@ -795,6 +860,103 @@ function currentAudio() {
   };
 }
 function saveAudio() { const audio = currentAudio(); appConfig.audio = audio; patchConfig({ audio }); }
+
+// ---- 自動返信 ----
+// ルール行はDOMがそのまま入力状態なので、保存時に毎回DOMから組み直す。
+// appConfig 側だけ更新して描画し直すとフォーカスが飛んで入力しづらくなるため、
+// 描画は config を受け取った時と行の増減時だけに限る。
+let arBound = false;
+function renderAutoReply() {
+  const ar = appConfig.autoReply || {};
+  const ai = ar.ai || {};
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+  chk('arEnabled', ar.enabled);
+  chk('arShow', ar.showInOverlay !== false);
+  chk('arAiEnabled', ai.enabled);
+  set('arPersona', ai.persona || '');
+  set('arMaxLen', ai.maxLen || 40);
+  set('arModel', ai.model || 'claude-opus-5');
+  set('arCooldown', ar.cooldownSec != null ? ar.cooldownSec : 8);
+  set('arUserCooldown', ar.userCooldownSec != null ? ar.userCooldownSec : 60);
+  set('arMaxPerMin', ar.maxPerMin || 6);
+  renderAutoReplyRules(ar.rules || []);
+  if (!arBound) { bindAutoReply(); arBound = true; }
+}
+function renderAutoReplyRules(rules) {
+  const box = document.getElementById('arRules');
+  if (!box) return;
+  box.innerHTML = '';
+  if (!rules.length) {
+    box.innerHTML = '<div class="hint" style="margin:0">ルールがありません。「＋ ルールを追加」から作成してください。</div>';
+    return;
+  }
+  rules.forEach((r, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML =
+      '<input type="text" class="arKey" style="flex:1; min-width:120px" placeholder="キーワード（カンマ区切り）" value="' + esc(r.keywords || '') + '">' +
+      '<input type="text" class="arReply" style="flex:2; min-width:180px" placeholder="返信文（{name}で投稿者名）" value="' + esc(r.reply || '') + '">' +
+      '<button class="ghost" data-i="' + i + '">削除</button>';
+    row.querySelector('button').onclick = () => {
+      // 未入力の行も含めた並びで消す。保存用に絞り込んだ配列で消すと
+      // 入力途中の空行がある時に1つずれた行が消えてしまう
+      const rules = domRules();
+      rules.splice(i, 1);
+      renderAutoReplyRules(rules);
+      saveAutoReply();
+    };
+    box.appendChild(row);
+  });
+}
+// 画面上のルール行をそのまま読む(空行も落とさない)
+function domRules() {
+  return [...document.querySelectorAll('#arRules .row')].map(row => ({
+    keywords: row.querySelector('.arKey').value.trim(),
+    reply: row.querySelector('.arReply').value.trim()
+  }));
+}
+function currentAutoReply() {
+  const num = (id, d) => { const v = parseInt(document.getElementById(id).value, 10); return isNaN(v) ? d : v; };
+  const rules = domRules().filter(r => r.keywords && r.reply);   // 保存するのは両方埋まった行だけ
+  return {
+    ...(appConfig.autoReply || {}),
+    enabled: document.getElementById('arEnabled').checked,
+    showInOverlay: document.getElementById('arShow').checked,
+    rules,
+    ai: {
+      ...((appConfig.autoReply || {}).ai || {}),
+      enabled: document.getElementById('arAiEnabled').checked,
+      persona: document.getElementById('arPersona').value.trim(),
+      maxLen: num('arMaxLen', 40),
+      model: document.getElementById('arModel').value
+    },
+    cooldownSec: num('arCooldown', 8),
+    userCooldownSec: num('arUserCooldown', 60),
+    maxPerMin: num('arMaxPerMin', 6)
+  };
+}
+function saveAutoReply() {
+  const autoReply = currentAutoReply();
+  appConfig.autoReply = autoReply;
+  patchConfig({ autoReply });
+}
+function addAutoReplyRule() {
+  const rules = domRules();
+  rules.push({ keywords: '', reply: '' });
+  renderAutoReplyRules(rules);   // 空行は保存対象外なので、ここでは保存しない
+}
+function bindAutoReply() {
+  ['arEnabled', 'arShow', 'arAiEnabled', 'arModel'].forEach(id => {
+    document.getElementById(id).addEventListener('change', saveAutoReply);
+  });
+  ['arPersona', 'arMaxLen', 'arCooldown', 'arUserCooldown', 'arMaxPerMin'].forEach(id => {
+    document.getElementById(id).addEventListener('change', saveAutoReply);
+  });
+  // ルール行は動的に増えるので、まとめて拾う
+  document.getElementById('arRules').addEventListener('change', saveAutoReply);
+}
+
 function bindEq() {
   document.getElementById('eqEnabled').addEventListener('change', saveAudio);
   ['eqLow', 'eqMid', 'eqHigh', 'eqVolume'].forEach(id => {

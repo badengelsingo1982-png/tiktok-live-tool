@@ -748,6 +748,13 @@ socket.on('event', ev => {
       }
       break;
 
+    // 自動返信。読み上げはコメント読み上げのON/OFFとは独立させる
+    // (「コメントは読まないが返信だけ喋らせたい」という使い方ができるように)
+    case 'reply':
+      if (ev.showInOverlay !== false) addChat({ nickname: '🤖 自動返信', avatar: '' }, ev.text, true);
+      speak(ev.text);
+      break;
+
     case 'gift': {
       const cfg = a.gift || {};
       if (cfg.enabled === false) break;

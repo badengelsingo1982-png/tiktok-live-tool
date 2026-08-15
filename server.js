@@ -123,6 +123,8 @@ function cookieToken(cookieHeader) {
 // テナント(ユーザーごとの状態)
 // ============================================================
 const AUTO_RETRY_MS = 30000; // 配信待ちの再確認間隔 (30秒)
+// AI自動返信の待ち上限。配信のテンポから外れた返信は読み上げても邪魔になるだけなので短くする
+const AI_REPLY_TIMEOUT_MS = 8000;
 const SOUND_TYPES = ['gift', 'follow', 'share'];
 // ギフト→サウンドの割当上限。変更したら dashboard.html の MAX_GIFT_RULES も揃えること
 const MAX_GIFT_RULES = 50;
@@ -148,7 +150,18 @@ function defaultConfig(username) {
             share: { enabled: true, sound: '', duration: 4000 }
         },
         chatOverlay: { enabled: true, maxMessages: 8 },
-        audio: { eqEnabled: false, eqLow: 0, eqMid: 0, eqHigh: 0, volume: 1 }
+        audio: { eqEnabled: false, eqLow: 0, eqMid: 0, eqHigh: 0, volume: 1 },
+        // 自動返信: コメントに反応して返信文を読み上げる(TikTokへの投稿ではない)
+        // rules が先に照合され、どれにも当たらなかった時だけ ai を使う
+        autoReply: {
+            enabled: false,
+            rules: [],   // [{ keywords: 'こんにちは,こんばんは', reply: '{name}さん、いらっしゃいませ!' }]
+            ai: { enabled: false, model: 'claude-opus-5', persona: '', maxLen: 40 },
+            showInOverlay: true,
+            cooldownSec: 8,       // 返信どうしの最短間隔
+            userCooldownSec: 60,  // 同じ人に再び返すまでの間隔
+            maxPerMin: 6          // 1分あたりの返信上限
+        }
     };
 }
 
@@ -163,7 +176,9 @@ function loadTenant(key) {
         giftCatalog: readJSON(path.join(userDir(key), 'gift-catalog.json'), []),
         status: { connected: false, username: '', viewers: 0, likes: 0, diamonds: 0 },
         // connGen: 接続のやり直しごとに進める世代番号。connectTikTok() を参照
-        connection: null, connecting: false, autoTimer: null, connGen: 0
+        connection: null, connecting: false, autoTimer: null, connGen: 0,
+        // 自動返信の流量制御(永続化しない。maybeAutoReply() を参照)
+        reply: { at: [], byUser: new Map(), lastAt: 0 }
     };
     if (!Array.isArray(t.soundboard.library)) t.soundboard.library = [];
     if (!Array.isArray(t.soundboard.giftRules)) t.soundboard.giftRules = [];
@@ -988,6 +1003,124 @@ function userInfo(u) {
         avatar: (u.avatarThumb && u.avatarThumb.urlList && u.avatarThumb.urlList[0]) || ''
     };
 }
+// ============================================================
+// 自動返信: コメントに反応して返信文を作り、オーバーレイに読み上げさせる。
+// TikTokのコメント欄には投稿しない(送信APIは有料プラン+sessionidが必要なため)。
+// 定型ルールを先に照合し、当たらなかった時だけAI生成にフォールバックする。
+// ============================================================
+let anthropic;   // 初回利用時に生成。APIキーが無ければ false を入れて再試行しない
+function getAnthropic() {
+    if (anthropic !== undefined) return anthropic;
+    if (!process.env.ANTHROPIC_API_KEY) {
+        console.log('  AI自動返信は無効: ANTHROPIC_API_KEY が未設定');
+        return (anthropic = false);
+    }
+    try {
+        const mod = require('@anthropic-ai/sdk');
+        anthropic = new (mod.default || mod)();
+        console.log('  AI自動返信: Anthropic APIキーを検出');
+    } catch (e) {
+        console.error('  AI自動返信を初期化できません:', e.message);
+        anthropic = false;
+    }
+    return anthropic;
+}
+
+// 返信文の {name} を投稿者名に差し替える
+function renderReply(tpl, ev) { return String(tpl || '').replace(/\{name\}/g, ev.nickname || ''); }
+
+// 照合はコメント1件ごとに走るので、設定が壊れていても青天井にならないよう上限を切る
+const MAX_REPLY_RULES = 100;
+function matchRule(rules, text) {
+    const lower = text.toLowerCase();
+    for (const r of (rules || []).slice(0, MAX_REPLY_RULES)) {
+        if (!r || !r.reply) continue;
+        const keys = String(r.keywords || '').split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+        if (keys.some(k => lower.includes(k))) return r;
+    }
+    return null;
+}
+
+// 返信枠を確保する。上限に達していれば false。
+// 枠は「返信すると決めた時点」で消費する。AI生成は時間がかかるので、
+// 先に消費しないと待っている間に何件も並行してAPIを叩いてしまう。
+function takeReplySlot(t, cfg, userId) {
+    const now = Date.now();
+    const st = t.reply;
+    st.at = st.at.filter(ts => now - ts < 60000);
+    if (st.at.length >= (cfg.maxPerMin || 6)) return false;
+    if (now - st.lastAt < (cfg.cooldownSec || 8) * 1000) return false;
+    const last = st.byUser.get(userId);
+    if (last && now - last < (cfg.userCooldownSec || 60) * 1000) return false;
+    st.at.push(now);
+    st.lastAt = now;
+    if (userId) st.byUser.set(userId, now);
+    if (st.byUser.size > 500) st.byUser.clear();   // 長時間配信でのメモリ肥大を防ぐ
+    return true;
+}
+
+async function aiReply(t, cfg, ev, text) {
+    const client = getAnthropic();
+    if (!client) return null;
+    const maxLen = cfg.ai.maxLen || 40;
+    const persona = (cfg.ai.persona || '').trim() ||
+        'あなたはTikTokライブ配信者の配信アシスタントです。視聴者のコメントに明るく短く反応します。';
+    const system = [
+        persona,
+        '',
+        '返信のルール:',
+        `- ${maxLen}文字以内の日本語で、1文だけ返す`,
+        '- そのまま音声で読み上げるので、記号・絵文字・箇条書き・マークダウンは使わない',
+        '- 視聴者への呼びかけとして自然な話し言葉にする',
+        '- 返信文だけを出力し、前置きや説明は書かない',
+        '- 内部用やシステム用のXMLタグを出力に含めない'
+    ].join('\n');
+    const model = cfg.ai.model || 'claude-opus-5';
+    // 読み上げは即時性が命なので thinking を切って effort を下げる。
+    // ただし effort は Claude 5 系のみで、Haiku 4.5 に送ると 400 になるので付けない。
+    // thinking を切ると内部タグが混ざることがあるため、上の指示と下の除去で二重に防ぐ。
+    const tuning = /^claude-(opus|sonnet)-5/.test(model)
+        ? { thinking: { type: 'disabled' }, output_config: { effort: 'low' } }
+        : {};
+    try {
+        const res = await client.messages.create({
+            model,
+            max_tokens: 300,
+            ...tuning,
+            system,
+            messages: [{ role: 'user', content: `視聴者「${ev.nickname}」さんのコメント: ${text}` }]
+        }, { timeout: AI_REPLY_TIMEOUT_MS });
+        if (res.stop_reason === 'refusal') return null;
+        const out = res.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+        // タグ混入と長すぎる返信を落とす(読み上げキューを溢れさせないため)
+        const clean = out.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+        return clean ? clean.slice(0, maxLen) : null;
+    } catch (e) {
+        console.error(`[${t.key}] AI自動返信の生成に失敗:`, e.message);
+        return null;
+    }
+}
+
+async function maybeAutoReply(t, ev) {
+    const cfg = t.config.autoReply;
+    if (!cfg || !cfg.enabled) return;
+    const text = String(ev.comment || '').trim();
+    if (!text) return;
+
+    const rule = matchRule(cfg.rules, text);
+    const useAi = !rule && cfg.ai && cfg.ai.enabled;
+    if (!rule && !useAi) return;
+    if (!takeReplySlot(t, cfg, ev.userId)) return;
+
+    const reply = rule ? renderReply(rule.reply, ev) : await aiReply(t, cfg, ev, text);
+    if (!reply) return;
+    broadcast(t, 'reply', {
+        nickname: ev.nickname, avatar: ev.avatar,
+        text: reply, source: rule ? 'rule' : 'ai',
+        showInOverlay: cfg.showInOverlay !== false
+    });
+}
+
 function cancelAutoRetry(t) { if (t.autoTimer) { clearTimeout(t.autoTimer); t.autoTimer = null; } }
 function scheduleAutoRetry(t) {
     cancelAutoRetry(t);
@@ -1028,6 +1161,8 @@ async function connectTikTok(t, username) {
         const u = userInfo(data.user);
         const comment = data.comment ?? data.content ?? '';
         broadcast(t, 'chat', { ...u, comment });
+        // 自動返信はAI生成で数秒かかることがある。コメント表示を待たせないよう投げっぱなしにする
+        maybeAutoReply(t, { ...u, comment }).catch(e => console.error(`[${t.key}] 自動返信:`, e.message));
     });
     connection.on(WebcastEvent.GIFT, data => {
         if (stale()) return;
@@ -1165,10 +1300,17 @@ io.on('connection', socket => {
             broadcast(t, 'system', { message: '自動接続OFF' });
         }
     });
-    socket.on('test', type => {
+    socket.on('test', (type, payload) => {
         const dummy = { userId: 'test_user', nickname: 'テスト太郎', avatar: '' };
         if (type === 'gift') broadcast(t, 'gift', { ...dummy, giftName: 'ローズ', giftImage: '', count: 5, diamonds: 5 });
         else if (type === 'chat') broadcast(t, 'chat', { ...dummy, comment: 'こんにちは!テストコメントです' });
+        else if (type === 'reply') {
+            // 自動返信の確認用。流量制御に引っかかってテストが空振りしないよう枠を空けてから流す
+            const comment = String(payload || 'こんにちは!').slice(0, 200);
+            t.reply = { at: [], byUser: new Map(), lastAt: 0 };
+            broadcast(t, 'chat', { ...dummy, comment });
+            maybeAutoReply(t, { ...dummy, comment }).catch(e => console.error(`[${t.key}] 自動返信テスト:`, e.message));
+        }
         else if (type === 'follow') broadcast(t, 'follow', dummy);
         else if (type === 'like') { t.status.likes += 10; broadcast(t, 'like', { ...dummy, count: 10, total: t.status.likes }); pushStatus(t); }
     });
