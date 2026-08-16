@@ -866,7 +866,13 @@ function saveAudio() { const audio = currentAudio(); appConfig.audio = audio; pa
 // appConfig 側だけ更新して描画し直すとフォーカスが飛んで入力しづらくなるため、
 // 描画は config を受け取った時と行の増減時だけに限る。
 let arBound = false;
+let arLoaded = false;
 function renderAutoReply() {
+  // configは自分の保存を含む「あらゆる設定変更」で飛んでくる。毎回描画し直すと
+  // ルール入力中の欄がフォーカスごと消えてしまうので、DOMへの反映は初回だけにする。
+  // 以降はこの画面のDOMを正とし、保存はDOMから読み取る(currentAutoReply)。
+  if (arLoaded) return;
+  arLoaded = true;
   const ar = appConfig.autoReply || {};
   const ai = ar.ai || {};
   const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
@@ -918,7 +924,10 @@ function domRules() {
 }
 function currentAutoReply() {
   const num = (id, d) => { const v = parseInt(document.getElementById(id).value, 10); return isNaN(v) ? d : v; };
-  const rules = domRules().filter(r => r.keywords && r.reply);   // 保存するのは両方埋まった行だけ
+  // 入力途中(キーワードだけ/返信だけ)の行も残す。両方空の行だけ捨てる。
+  // 「両方埋まった行だけ」にすると、返信を入力する前に保存が走った時に行が消える。
+  // サーバー側の matchRule は reply の無いルールを自動でスキップするので残しても無害。
+  const rules = domRules().filter(r => r.keywords || r.reply);
   return {
     ...(appConfig.autoReply || {}),
     enabled: document.getElementById('arEnabled').checked,
