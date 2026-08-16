@@ -9,6 +9,7 @@ npm-debug.log*
 # 実行時に生成/アップロードされるデータ（サーバーごとに固有。Git管理しない）
 soundboard.json
 gift-catalog.json
+listeners.json
 sounds/*.mp3
 sounds/lib/
 # public/icons/ は Git 管理する。自作アイコンをVPSへ配るため。

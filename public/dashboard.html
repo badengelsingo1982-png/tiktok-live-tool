@@ -233,6 +233,9 @@
         <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
           <input type="checkbox" id="arAiEnabled"> どのルールにも当たらない時はAIが返信を作る
         </label>
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--txt)">
+          <input type="checkbox" id="arRemember"> リスナーを記憶して返信の材料にする
+        </label>
       </div>
       <div class="row">
         <span style="width:96px">AIの性格</span>
@@ -264,7 +267,25 @@
         <b>定型ルール</b>はキーワードを含むコメントに即座に反応します（カンマ区切りで複数指定可）。合成音声がキャッシュされるので2回目以降はほぼ即座に鳴ります。<br>
         <b>AI返信</b>はルールに当たらなかったコメントだけが対象です。使うには<b>サーバーに <code>ANTHROPIC_API_KEY</code> の設定が必要</b>で、
         生成に数秒かかり、コメント1件ごとにAPI料金がかかります。上の「返信の間隔」で件数を絞ってください。<br>
+        <b>リスナーを記憶</b>すると、コメントした人と内容を配信をまたいで覚え、AI返信の材料にします（「また来てくれた」「前に○○の話…」など）。
+        視聴者のコメントをサーバーに保存するので、必要な時だけONにしてください。記憶した内容は下の「リスナー記憶」で確認・削除できます。<br>
         ※ 盛り上がった時に返信で読み上げが埋まらないよう、初めは間隔を長めにして様子を見ることをおすすめします。
+      </div>
+    </div>
+  </details>
+
+  <details class="panel" id="lsPanel" ontoggle="if(this.open) loadListeners()">
+    <summary>リスナー記憶 <span class="sub">覚えている視聴者</span></summary>
+    <div style="margin-top:12px; display:flex; flex-direction:column; gap:10px">
+      <div class="row">
+        <button class="ghost" onclick="loadListeners()">↻ 更新</button>
+        <span id="lsCount" style="color:var(--sub)"></span>
+        <button class="ghost" style="margin-left:auto" onclick="clearListeners()">全消去</button>
+      </div>
+      <div id="lsList" style="display:flex; flex-direction:column; gap:6px"></div>
+      <div class="hint">
+        「自動返信」で<b>リスナーを記憶</b>をONにすると、コメントした人がここに溜まります（最近来た順に最大200人まで表示）。
+        1人につき直近のコメントを最大20件覚え、そのうち5件をAI返信の材料に使います。プライバシーが気になる方は不要になったら消してください。
       </div>
     </div>
   </details>
@@ -880,6 +901,7 @@ function renderAutoReply() {
   chk('arEnabled', ar.enabled);
   chk('arShow', ar.showInOverlay !== false);
   chk('arAiEnabled', ai.enabled);
+  chk('arRemember', ar.rememberListeners);
   set('arPersona', ai.persona || '');
   set('arMaxLen', ai.maxLen || 40);
   set('arModel', ai.model || 'claude-opus-5');
@@ -932,6 +954,7 @@ function currentAutoReply() {
     ...(appConfig.autoReply || {}),
     enabled: document.getElementById('arEnabled').checked,
     showInOverlay: document.getElementById('arShow').checked,
+    rememberListeners: document.getElementById('arRemember').checked,
     rules,
     ai: {
       ...((appConfig.autoReply || {}).ai || {}),
@@ -956,7 +979,7 @@ function addAutoReplyRule() {
   renderAutoReplyRules(rules);   // 空行は保存対象外なので、ここでは保存しない
 }
 function bindAutoReply() {
-  ['arEnabled', 'arShow', 'arAiEnabled', 'arModel'].forEach(id => {
+  ['arEnabled', 'arShow', 'arAiEnabled', 'arRemember', 'arModel'].forEach(id => {
     document.getElementById(id).addEventListener('change', saveAutoReply);
   });
   ['arPersona', 'arMaxLen', 'arCooldown', 'arUserCooldown', 'arMaxPerMin'].forEach(id => {
@@ -964,6 +987,48 @@ function bindAutoReply() {
   });
   // ルール行は動的に増えるので、まとめて拾う
   document.getElementById('arRules').addEventListener('change', saveAutoReply);
+}
+
+// ---- リスナー記憶の一覧 ----
+async function loadListeners() {
+  const box = document.getElementById('lsList');
+  box.innerHTML = '<div class="hint" style="margin:0">読み込み中…</div>';
+  try {
+    const r = await fetch(B + '/listeners');
+    const data = await r.json();
+    const cnt = document.getElementById('lsCount');
+    cnt.textContent = data.total ? `合計 ${data.total} 人` + (data.total > 200 ? '（最近の200人を表示）' : '') : '';
+    if (!data.listeners.length) {
+      box.innerHTML = '<div class="hint" style="margin:0">まだ記憶しているリスナーはいません（「自動返信」で「リスナーを記憶」をONにしてください）。</div>';
+      return;
+    }
+    box.innerHTML = '';
+    data.listeners.forEach(l => {
+      const d = new Date(l.lastSeen);
+      const when = `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.style.cssText = 'align-items:flex-start; gap:8px';
+      row.innerHTML =
+        '<div style="flex:1; min-width:0">' +
+          '<div><b>' + esc(l.nickname) + '</b> <span style="color:var(--sub)">' + l.count + '回 / 最終 ' + when + '</span></div>' +
+          (l.last ? '<div style="color:var(--sub); overflow:hidden; text-overflow:ellipsis; white-space:nowrap">「' + esc(l.last) + '」</div>' : '') +
+        '</div>' +
+        '<button class="ghost">削除</button>';
+      row.querySelector('button').onclick = async () => {
+        await fetch(B + '/listeners/' + encodeURIComponent(l.id), { method: 'DELETE' });
+        loadListeners();
+      };
+      box.appendChild(row);
+    });
+  } catch (e) {
+    box.innerHTML = '<div class="hint" style="margin:0">読み込みに失敗しました。</div>';
+  }
+}
+async function clearListeners() {
+  if (!confirm('記憶しているリスナーをすべて消去します。よろしいですか？')) return;
+  await fetch(B + '/listeners', { method: 'DELETE' });
+  loadListeners();
 }
 
 function bindEq() {

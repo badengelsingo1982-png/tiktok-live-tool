@@ -125,6 +125,11 @@ function cookieToken(cookieHeader) {
 const AUTO_RETRY_MS = 30000; // 配信待ちの再確認間隔 (30秒)
 // AI自動返信の待ち上限。配信のテンポから外れた返信は読み上げても邪魔になるだけなので短くする
 const AI_REPLY_TIMEOUT_MS = 8000;
+// リスナー記憶: 1人あたりに保持するコメント数と、覚える人数の上限(古い順に間引く)
+const MAX_LISTENER_COMMENTS = 20;
+const MAX_LISTENERS = 3000;
+// AI返信の材料として渡す過去コメント数(多すぎるとトークンと費用が増える)
+const MEMORY_COMMENTS_FOR_AI = 5;
 const SOUND_TYPES = ['gift', 'follow', 'share'];
 // ギフト→サウンドの割当上限。変更したら dashboard.html の MAX_GIFT_RULES も揃えること
 const MAX_GIFT_RULES = 50;
@@ -157,6 +162,9 @@ function defaultConfig(username) {
             enabled: false,
             rules: [],   // [{ keywords: 'こんにちは,こんばんは', reply: '{name}さん、いらっしゃいませ!' }]
             ai: { enabled: false, model: 'claude-opus-5', persona: '', maxLen: 40 },
+            // リスナー記憶: コメントした人と内容を覚え、AI返信の材料にする。
+            // 視聴者のコメントをディスクに保存するので既定はOFF(利用者が明示的に有効化)
+            rememberListeners: false,
             showInOverlay: true,
             cooldownSec: 8,       // 返信どうしの最短間隔
             userCooldownSec: 60,  // 同じ人に再び返すまでの間隔
@@ -174,15 +182,19 @@ function loadTenant(key) {
         config: Object.assign(defaultConfig(username), readJSON(path.join(userDir(key), 'config.json'), {})),
         soundboard: readJSON(path.join(userDir(key), 'soundboard.json'), { library: [], giftRules: [] }),
         giftCatalog: readJSON(path.join(userDir(key), 'gift-catalog.json'), []),
+        // リスナー記憶: { <userId>: { nickname, count, firstSeen, lastSeen, comments:[...] } }
+        listeners: readJSON(path.join(userDir(key), 'listeners.json'), {}),
         status: { connected: false, username: '', viewers: 0, likes: 0, diamonds: 0 },
         // connGen: 接続のやり直しごとに進める世代番号。connectTikTok() を参照
         connection: null, connecting: false, autoTimer: null, connGen: 0,
         // 自動返信の流量制御(永続化しない。maybeAutoReply() を参照)
-        reply: { at: [], byUser: new Map(), lastAt: 0 }
+        reply: { at: [], byUser: new Map(), lastAt: 0 },
+        listenersSaveTimer: null   // リスナー記憶の保存デバウンス用
     };
     if (!Array.isArray(t.soundboard.library)) t.soundboard.library = [];
     if (!Array.isArray(t.soundboard.giftRules)) t.soundboard.giftRules = [];
     if (!Array.isArray(t.giftCatalog)) t.giftCatalog = [];
+    if (!t.listeners || typeof t.listeners !== 'object') t.listeners = {};
     seedGiftCatalog(t);
     tenants.set(key, t);
     return t;
@@ -194,6 +206,14 @@ function getTenant(key) {
 }
 function saveTenantConfig(t) { writeJSON(path.join(userDir(t.key), 'config.json'), t.config); }
 function saveTenantSoundboard(t) { writeJSON(path.join(userDir(t.key), 'soundboard.json'), t.soundboard); }
+// リスナー記憶はコメントごとに更新されるので、書き込みが集中しないようまとめて保存する
+function scheduleSaveListeners(t) {
+    if (t.listenersSaveTimer) return;
+    t.listenersSaveTimer = setTimeout(() => {
+        t.listenersSaveTimer = null;
+        writeJSON(path.join(userDir(t.key), 'listeners.json'), t.listeners);
+    }, 5000);
+}
 function saveTenantCatalog(t) { writeJSON(path.join(userDir(t.key), 'gift-catalog.json'), t.giftCatalog); }
 
 function seedGiftCatalog(t) {
@@ -517,6 +537,33 @@ router.post('/config', requireUser, (req, res) => {
 });
 router.get('/soundboard', requireUser, (req, res) => res.json(getTenant(req.userKey).soundboard));
 router.get('/gift-catalog', requireUser, (req, res) => res.json(getTenant(req.userKey).giftCatalog));
+
+// リスナー記憶: 一覧(最近来た順に最大200件)・個別削除・全消去
+router.get('/listeners', requireUser, (req, res) => {
+    const t = getTenant(req.userKey);
+    const ids = Object.keys(t.listeners);
+    const list = ids
+        .map(id => {
+            const m = t.listeners[id];
+            const comments = Array.isArray(m.comments) ? m.comments : [];
+            return { id, nickname: m.nickname || id, count: m.count || 0, lastSeen: m.lastSeen || 0, last: comments[comments.length - 1] || '' };
+        })
+        .sort((a, b) => b.lastSeen - a.lastSeen)
+        .slice(0, 200);
+    res.json({ total: ids.length, listeners: list });
+});
+router.delete('/listeners/:id', requireUser, (req, res) => {
+    const t = getTenant(req.userKey);
+    delete t.listeners[req.params.id];
+    scheduleSaveListeners(t);
+    res.json({ ok: true });
+});
+router.delete('/listeners', requireUser, (req, res) => {
+    const t = getTenant(req.userKey);
+    t.listeners = {};
+    scheduleSaveListeners(t);
+    res.json({ ok: true });
+});
 
 // アラート効果音をライブラリのサウンドに設定 (soundId空でビープ音)
 router.post('/set-sound/:type', requireUser, (req, res) => {
@@ -1029,6 +1076,38 @@ function getAnthropic() {
 // 返信文の {name} を投稿者名に差し替える
 function renderReply(tpl, ev) { return String(tpl || '').replace(/\{name\}/g, ev.nickname || ''); }
 
+// ---- リスナー記憶 ----
+// コメントした人とその内容を覚える。配信をまたいで保持し、AI返信の材料にする。
+function recordListener(t, u, comment) {
+    if (!t.config.autoReply || !t.config.autoReply.rememberListeners) return;
+    const id = u.userId;
+    if (!id) return;   // 安定したIDが取れないコメントは記憶しない
+    const text = String(comment || '').trim();
+    if (!text) return;
+    const now = Date.now();
+    let m = t.listeners[id];
+    if (!m) m = t.listeners[id] = { nickname: u.nickname, count: 0, firstSeen: now, lastSeen: now, comments: [] };
+    m.nickname = u.nickname || m.nickname;
+    m.count++;
+    m.lastSeen = now;
+    if (!Array.isArray(m.comments)) m.comments = [];
+    m.comments.push(text);
+    if (m.comments.length > MAX_LISTENER_COMMENTS) m.comments = m.comments.slice(-MAX_LISTENER_COMMENTS);
+    pruneListeners(t);
+    scheduleSaveListeners(t);
+}
+// 覚える人数が上限を超えたら、最後に来たのが古い順に間引く
+function pruneListeners(t) {
+    const ids = Object.keys(t.listeners);
+    if (ids.length <= MAX_LISTENERS) return;
+    ids.sort((a, b) => (t.listeners[a].lastSeen || 0) - (t.listeners[b].lastSeen || 0));
+    for (let i = 0; i < ids.length - MAX_LISTENERS; i++) delete t.listeners[ids[i]];
+}
+// AIに渡す前の履歴を取り出す(この時点ではまだ今回のコメントは記録していない)
+function getListener(t, userId) {
+    return (userId && t.listeners[userId]) || null;
+}
+
 // 照合はコメント1件ごとに走るので、設定が壊れていても青天井にならないよう上限を切る
 const MAX_REPLY_RULES = 100;
 function matchRule(rules, text) {
@@ -1059,7 +1138,7 @@ function takeReplySlot(t, cfg, userId) {
     return true;
 }
 
-async function aiReply(t, cfg, ev, text) {
+async function aiReply(t, cfg, ev, text, mem) {
     const client = getAnthropic();
     if (!client) return null;
     const maxLen = cfg.ai.maxLen || 40;
@@ -1075,6 +1154,18 @@ async function aiReply(t, cfg, ev, text) {
         '- 返信文だけを出力し、前置きや説明は書かない',
         '- 内部用やシステム用のXMLタグを出力に含めない'
     ].join('\n');
+    // このリスナーの記憶を材料としてまとめる。system(固定)ではなくuser側に入れて、
+    // キャッシュの効く固定部分を崩さないようにする。
+    let memBlock = '';
+    if (mem && mem.count > 0) {
+        const recent = (mem.comments || []).slice(-MEMORY_COMMENTS_FOR_AI);
+        memBlock = `【このリスナーの記録】これまで${mem.count}回コメント(初回ではない)。`;
+        if (recent.length) memBlock += `過去のコメント: ${recent.map(c => `「${c}」`).join(' ')}`;
+        memBlock += '\n返信で自然に触れてよい(毎回無理に触れる必要はない)。\n\n';
+    } else if (mem === null && cfg.rememberListeners) {
+        memBlock = '【このリスナーの記録】初めてのコメント。\n\n';
+    }
+
     const model = cfg.ai.model || 'claude-opus-5';
     // 読み上げは即時性が命なので thinking を切って effort を下げる。
     // ただし effort は Claude 5 系のみで、Haiku 4.5 に送ると 400 になるので付けない。
@@ -1088,7 +1179,7 @@ async function aiReply(t, cfg, ev, text) {
             max_tokens: 300,
             ...tuning,
             system,
-            messages: [{ role: 'user', content: `視聴者「${ev.nickname}」さんのコメント: ${text}` }]
+            messages: [{ role: 'user', content: `${memBlock}視聴者「${ev.nickname}」さんのコメント: ${text}` }]
         }, { timeout: AI_REPLY_TIMEOUT_MS });
         if (res.stop_reason === 'refusal') return null;
         const out = res.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
@@ -1112,7 +1203,10 @@ async function maybeAutoReply(t, ev) {
     if (!rule && !useAi) return;
     if (!takeReplySlot(t, cfg, ev.userId)) return;
 
-    const reply = rule ? renderReply(rule.reply, ev) : await aiReply(t, cfg, ev, text);
+    // 今回のコメントを記録する前に履歴を取り出す(returnには含めない)。
+    // recordListener() はこの関数の同期部分より後に呼ばれるので、ここは過去分だけを見る。
+    const mem = (useAi && cfg.rememberListeners) ? getListener(t, ev.userId) : null;
+    const reply = rule ? renderReply(rule.reply, ev) : await aiReply(t, cfg, ev, text, mem);
     if (!reply) return;
     broadcast(t, 'reply', {
         nickname: ev.nickname, avatar: ev.avatar,
@@ -1161,8 +1255,11 @@ async function connectTikTok(t, username) {
         const u = userInfo(data.user);
         const comment = data.comment ?? data.content ?? '';
         broadcast(t, 'chat', { ...u, comment });
-        // 自動返信はAI生成で数秒かかることがある。コメント表示を待たせないよう投げっぱなしにする
+        // 先に自動返信を起動する(この関数の同期部分で過去の記憶を読む)。
+        // AI生成で数秒かかることがあるのでコメント表示を待たせず投げっぱなしにする。
         maybeAutoReply(t, { ...u, comment }).catch(e => console.error(`[${t.key}] 自動返信:`, e.message));
+        // その後で今回のコメントを記録する(次回以降の材料になる)
+        recordListener(t, u, comment);
     });
     connection.on(WebcastEvent.GIFT, data => {
         if (stale()) return;
