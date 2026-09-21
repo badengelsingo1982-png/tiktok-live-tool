@@ -336,13 +336,14 @@
     <div style="margin-top:16px">
       <div class="k" style="color:var(--sub); margin-bottom:6px">② ギフトにサウンドを割り当て <span id="ruleCount" style="margin-left:4px"></span></div>
       <div class="row">
-        <select id="ruleGift" class="soundsel" style="min-width:180px" onchange="updateRuleLimitUI()"></select>
+        <img id="ruleGiftIcon" alt="" onerror="this.style.display='none'" style="width:32px; height:32px; object-fit:contain; display:none; flex:none">
+        <select id="ruleGift" class="soundsel" style="min-width:180px" onchange="onRuleGiftChange()"></select>
         <span style="color:var(--sub)">→</span>
         <select id="ruleSound" style="background:#0a0d13; border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:10px 12px"></select>
         <button id="btnAddRule" onclick="addRule()">割当</button>
       </div>
       <div id="ruleList" style="margin-top:10px; display:flex; flex-direction:column; gap:6px"></div>
-      <div class="hint">ギフトは一覧から選択します（定番ギフト＋実際に届いたギフトを自動追加）。割当が無いギフトは既定のギフト音が鳴ります。最大50個まで登録できます（同じギフトの音を変えるだけなら件数は増えません）。</div>
+      <div class="hint">ギフトは一覧から選択します（定番ギフト＋実際に届いたギフトを自動追加）。名前は日本語で表示し、カッコ内がTikTok上の英語名です。イラストは一度でも受け取ったギフトに表示されます（未受信のものは🎁のままです）。割当が無いギフトは既定のギフト音が鳴ります。最大50個まで登録できます（同じギフトの音を変えるだけなら件数は増えません）。</div>
     </div>
   </details>
 
@@ -1047,10 +1048,48 @@ let soundboard = { library: [], giftRules: [] };
 let giftCatalog = [];
 const seenGifts = new Set();
 
+// ---- ギフト名の日本語表示 ----
+// TikTokから届くギフト名は英語のみ。割当ルールのキーは英語名のままにして(overlay側の
+// 照合を壊さないため)、画面に出す文字だけ日本語にする。未知のギフトは英語のまま表示。
+const GIFT_JA = {
+  'rose': 'バラ', 'rosa': 'ローザ', 'tiktok': 'TikTok', 'heart': 'ハート', 'heart me': 'ハートミー',
+  'gg': 'GG', 'ice cream cone': 'アイスクリーム', 'finger heart': '指ハート', 'perfume': '香水',
+  'doughnut': 'ドーナツ', 'love you': 'ラブユー', 'love you so much': '大好き', 'hand hearts': '両手ハート',
+  'hand heart': '手ハート', 'sunglasses': 'サングラス', 'hi': 'ごあいさつ', 'cheer you up': '応援',
+  'team bracelet': 'チームブレスレット', 'football': 'サッカーボール', 'music play': 'ミュージックプレイ',
+  'gamepad': 'ゲームパッド', 'lion': 'ライオン', 'universe': 'ユニバース', 'rocket': 'ロケット',
+  'whale diving': 'クジラ', 'galaxy': 'ギャラクシー', 'corgi': 'コーギー', 'confetti': '紙吹雪',
+  'star': 'スター', 'diamond': 'ダイヤモンド', 'coral': 'サンゴ', 'falcon': 'ハヤブサ',
+  'sports car': 'スポーツカー', 'dragon': 'ドラゴン', 'interstellar': 'インターステラー',
+  'motorcycle': 'バイク', 'private jet': 'プライベートジェット', 'yacht': 'ヨット',
+  'a shard of hope': '希望のかけら', 'baseball': '野球ボール', 'bff necklace': '親友ネックレス',
+  'blossom po': 'ブロッサムPo', 'cake slice': 'ケーキ', 'cat paws': 'ネコの手', 'clap clap': '拍手',
+  'cute cat': 'かわいいネコ', 'dreamy strings': 'ドリーミーストリングス', 'fan': 'うちわ',
+  'firework': '花火', 'freestyle': 'フリースタイル', 'glow stick': 'ペンライト', 'good job': 'グッジョブ',
+  'ice lolly': 'アイスキャンディー', 'level-up sparks': 'レベルアップ', 'love letter': 'ラブレター',
+  'mate melody': 'メイトメロディ', 'mishka bear': 'ミーシャベア', 'music mic': 'マイク',
+  'music on stage': 'ステージ演奏', 'nice to meet u': 'はじめまして', 'oldies': 'オールディーズ',
+  'overreact': 'オーバーリアクション', 'pop': 'ポップ', 'popular vote': '人気投票',
+  'shaved ice': 'かき氷', 'support': 'サポート', 'suprised fish': 'びっくりフィッシュ',
+  'taiko no tatujin': '太鼓の達人', 'train': '電車', 'ultra fan': 'ウルトラファン',
+  'welcome dallah': 'ようこそダラー', 'wink wink': 'ウインク', "you're awesome": '最高だね'
+};
+// 表示用ラベル。日本語名があれば「バラ (Rose)」、無ければ英語名のまま
+function giftLabel(name) {
+  const ja = GIFT_JA[String(name || '').trim().toLowerCase()];
+  return ja && ja !== name ? `${ja} (${name})` : String(name || '');
+}
+// カタログに溜まっているギフト画像(TikTokのCDN URL)。未受信のギフトは空
+function giftImageOf(name) {
+  const key = String(name || '').trim().toLowerCase();
+  const g = giftCatalog.find(x => x && (x.name || '').trim().toLowerCase() === key);
+  return (g && g.image) || '';
+}
+
 socket.on('soundboard', sb => { if (sb) { soundboard = sb; renderSoundboard(); renderAlertSelects(); renderGiftOptions(); } });
 
 // サーバーから届くギフトカタログ（定番＋受信済み）
-socket.on('giftCatalog', gc => { if (Array.isArray(gc)) { giftCatalog = gc; renderGiftOptions(); } });
+socket.on('giftCatalog', gc => { if (Array.isArray(gc)) { giftCatalog = gc; renderGiftOptions(); renderRuleList(); } });
 
 // 届いたギフト名を即候補に反映
 socket.on('event', ev => {
@@ -1069,13 +1108,28 @@ function renderGiftOptions() {
   giftCatalog.forEach(g => { if (g && g.name) names.add(g.name); });
   soundboard.giftRules.forEach(r => { if (r.gift) names.add(r.gift); });
   seenGifts.forEach(g => names.add(g));
-  const sorted = [...names].filter(Boolean).sort((a, b) => a.localeCompare(b, 'ja'));
+  // 表示は日本語だが value は英語名のまま(overlay側の照合キーを変えないため)。
+  // 並び順も画面の見た目に合わせて日本語ラベル基準にする
+  const sorted = [...names].filter(Boolean)
+    .sort((a, b) => giftLabel(a).localeCompare(giftLabel(b), 'ja'));
   sel.innerHTML = sorted.length
-    ? sorted.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')
+    ? sorted.map(n => `<option value="${esc(n)}">${esc(giftLabel(n))}</option>`).join('')
     : '<option value="">(ギフト履歴なし)</option>';
   if (cur && sorted.includes(cur)) sel.value = cur;
   updateRuleLimitUI();
+  updateRuleGiftIcon();
 }
+
+// 選択中のギフトのイラストを隣に出す。画像が無いギフト(まだ受け取っていない)は非表示
+function updateRuleGiftIcon() {
+  const img = document.getElementById('ruleGiftIcon');
+  const sel = document.getElementById('ruleGift');
+  if (!img || !sel) return;
+  const src = giftImageOf(sel.value);
+  if (src) { img.src = src; img.alt = giftLabel(sel.value); img.style.display = ''; }
+  else { img.removeAttribute('src'); img.style.display = 'none'; }
+}
+function onRuleGiftChange() { updateRuleLimitUI(); updateRuleGiftIcon(); }
 
 // 割当の残り枠を表示し、上限に達したら「割当」を止める。
 // 既に割当済みのギフトは音の差し替えなので、上限でも操作できるようにしておく
@@ -1119,8 +1173,13 @@ function renderSoundboard() {
   const sel = document.getElementById('ruleSound');
   sel.innerHTML = soundboard.library.map(i => `<option value="${i.id}">${esc(i.name)}</option>`).join('')
     || '<option value="">(ライブラリが空)</option>';
-  // 割当ルール一覧
+  renderRuleList();
+}
+
+// 割当ルール一覧。ギフト画像はカタログ側から引くので、カタログ更新時にも呼び直す
+function renderRuleList() {
   const rl = document.getElementById('ruleList');
+  if (!rl) return;
   if (!soundboard.giftRules.length) {
     rl.innerHTML = '<span class="k" style="color:var(--sub)">割当なし</span>';
   } else {
@@ -1129,7 +1188,11 @@ function renderSoundboard() {
       const snd = soundboard.library.find(l => l.id === rule.soundId);
       const row = document.createElement('div');
       row.className = 'row';
-      row.innerHTML = `<span style="min-width:160px">🎁 <b>${esc(rule.gift)}</b></span><span style="color:var(--sub)">→ ${esc(snd ? snd.name : '(不明)')}</span>`;
+      const icon = giftImageOf(rule.gift);
+      row.innerHTML = `<span style="min-width:180px; display:inline-flex; align-items:center; gap:6px">`
+        + (icon ? `<img src="${esc(icon)}" alt="" onerror="this.replaceWith('🎁')" style="width:24px; height:24px; object-fit:contain; flex:none">` : '🎁')
+        + `<b>${esc(giftLabel(rule.gift))}</b></span>`
+        + `<span style="color:var(--sub)">→ ${esc(snd ? snd.name : '(不明)')}</span>`;
       const rm = document.createElement('button'); rm.className = 'ghost'; rm.textContent = '解除';
       rm.onclick = () => removeRule(rule.gift);
       row.appendChild(rm);
