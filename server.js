@@ -15,6 +15,7 @@ const { execFile } = require('child_process'); // VOICEVOXコンテナの起動/
 const multer = require('multer');
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const { TikTokLiveConnection, WebcastEvent } = require('tiktok-live-connector');
 
@@ -981,7 +982,54 @@ router.get('/tts', async (req, res) => {
 
 // ---- myinstants からサウンドを取得 ----
 const MI_BASE = 'https://www.myinstants.com';
-const MI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+const MI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+// myinstants は Cloudflare 配下にあり、ヘッダ名が小文字の "accept:" だと 403 を返す。
+// Node の fetch() (undici) はヘッダ名を必ず小文字に正規化してしまうため使えない。
+// 素の https モジュールなら指定した大文字小文字のまま送れるので、こちらで取得する。
+const MI_HEADERS = {
+    'Host': 'www.myinstants.com',
+    'User-Agent': MI_UA,
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate',
+    'Upgrade-Insecure-Requests': '1',
+    'Connection': 'close',
+};
+const MI_MAX_BYTES = 12 * 1024 * 1024;  // 暴走防止の保険。インポートの8MB上限判定は呼び出し側で行う
+// 応答を Buffer で返す。{ status, body }。リダイレクトは 3 回まで追う
+function miFetch(url, redirectsLeft = 3) {
+    return new Promise((resolve, reject) => {
+        const u = new URL(url);
+        const headers = { ...MI_HEADERS, Host: u.host };
+        const req = https.request(u, { method: 'GET', headers, timeout: 15000 }, (r) => {
+            const loc = r.headers.location;
+            if (loc && r.statusCode >= 300 && r.statusCode < 400) {
+                r.resume();
+                if (redirectsLeft <= 0) return reject(new Error('リダイレクトが多すぎます'));
+                const next = new URL(loc, u);
+                if (next.protocol !== 'https:') return reject(new Error('https以外へのリダイレクトです'));
+                return resolve(miFetch(next.href, redirectsLeft - 1));
+            }
+            const enc = String(r.headers['content-encoding'] || '').toLowerCase();
+            const out = enc === 'gzip' ? zlib.createGunzip()
+                : enc === 'deflate' ? zlib.createInflate()
+                    : null;
+            const src = out ? r.pipe(out) : r;
+            const chunks = [];
+            let size = 0;
+            src.on('data', (c) => {
+                size += c.length;
+                if (size > MI_MAX_BYTES) { req.destroy(new Error('応答が大きすぎます')); return; }
+                chunks.push(c);
+            });
+            src.on('end', () => resolve({ status: r.statusCode, body: Buffer.concat(chunks) }));
+            src.on('error', reject);
+        });
+        req.on('timeout', () => req.destroy(new Error('タイムアウトしました')));
+        req.on('error', reject);
+        req.end();
+    });
+}
 function decodeHtmlEntities(s) {
     return String(s).replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
         .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
@@ -1003,9 +1051,11 @@ router.get('/myinstants/search', requireUser, async (req, res) => {
     const q = (req.query.q || '').toString().trim();
     if (q.length < 2) return res.status(400).json({ error: '2文字以上で検索してください' });
     try {
-        const r = await fetch(`${MI_BASE}/ja/search/?name=${encodeURIComponent(q)}`, { headers: { 'User-Agent': MI_UA } });
-        if (!r.ok) return res.status(502).json({ error: `myinstants取得失敗 (${r.status})` });
-        res.json({ items: parseInstants(await r.text()) });
+        const r = await miFetch(`${MI_BASE}/ja/search/?name=${encodeURIComponent(q)}`);
+        // myinstants は「該当なし」でも 404 を返すので、エラー扱いせず空の結果にする
+        if (r.status === 404) return res.json({ items: [] });
+        if (r.status !== 200) return res.status(502).json({ error: `myinstants取得失敗 (${r.status})` });
+        res.json({ items: parseInstants(r.body.toString('utf8')) });
     } catch (e) { res.status(502).json({ error: '通信エラー: ' + e.message }); }
 });
 router.post('/soundboard/import', requireUser, async (req, res) => {
@@ -1017,9 +1067,9 @@ router.post('/soundboard/import', requireUser, async (req, res) => {
         const u = new URL(mp3);
         if (u.hostname !== 'www.myinstants.com' && u.hostname !== 'myinstants.com') return res.status(400).json({ error: 'myinstantsのURLではありません' });
         if (!/\/media\/sounds\//.test(u.pathname)) return res.status(400).json({ error: '音声URLではありません' });
-        const r = await fetch(u.href, { headers: { 'User-Agent': MI_UA } });
-        if (!r.ok) return res.status(502).json({ error: `ダウンロード失敗 (${r.status})` });
-        const buf = Buffer.from(await r.arrayBuffer());
+        const r = await miFetch(u.href);
+        if (r.status !== 200) return res.status(502).json({ error: `ダウンロード失敗 (${r.status})` });
+        const buf = r.body;
         if (!buf.length) return res.status(502).json({ error: '空のファイルです' });
         if (buf.length > 8 * 1024 * 1024) return res.status(400).json({ error: 'ファイルが大きすぎます(8MB上限)' });
         const t = getTenant(req.userKey);
