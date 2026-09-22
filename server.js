@@ -1410,6 +1410,10 @@ io.on('connection', socket => {
 
     if (socket.readonly) return; // オーバーレイは受信のみ
 
+    // AI返信が使えるかを管理画面に知らせる。APIキーが無いと aiReply() が黙ってnullを
+    // 返すだけで、画面上は「有効にしたのに何も起きない」状態になってしまうため
+    socket.emit('serverInfo', { aiAvailable: !!getAnthropic() });
+
     socket.on('connectLive', username => {
         const name = (username || t.config.username || '').replace(/^@/, '').trim();
         if (!name) return;

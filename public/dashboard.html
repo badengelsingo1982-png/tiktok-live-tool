@@ -237,6 +237,9 @@
           <input type="checkbox" id="arRemember"> リスナーを記憶して返信の材料にする
         </label>
       </div>
+      <div id="arAiWarn" class="hint" style="display:none; margin:0; color:var(--accent)">
+        サーバーに ANTHROPIC_API_KEY が設定されていないため、AIによる返信は動きません。定型ルールに当たらないコメントには何も返信されません。サーバーの <code>.env</code> にキーを追記して再起動してください。
+      </div>
       <div class="row">
         <span style="width:96px">AIの性格</span>
         <input type="text" id="arPersona" style="flex:1; min-width:220px" placeholder="例: 明るく元気な配信アシスタント。敬語は控えめ。">
@@ -511,6 +514,19 @@ socket.on('config', c => {
   renderEq();
   renderAutoReply();
 });
+// サーバー側の状態(AI返信が使えるか)。APIキーが無い時は自動返信パネルで警告する
+let aiAvailable = true;
+socket.on('serverInfo', info => {
+  if (!info) return;
+  aiAvailable = info.aiAvailable !== false;
+  updateAiWarn();
+});
+function updateAiWarn() {
+  const el = document.getElementById('arAiWarn');
+  if (!el) return;
+  const aiOn = (document.getElementById('arAiEnabled') || {}).checked;
+  el.style.display = (!aiAvailable && aiOn) ? '' : 'none';
+}
 socket.on('status', s => {
   if (s.connected) setConnecting(false);
   document.getElementById('badge').className = 'badge ' + (s.connected ? 'on' : 'off');
@@ -911,6 +927,7 @@ function renderAutoReply() {
   set('arMaxPerMin', ar.maxPerMin || 6);
   renderAutoReplyRules(ar.rules || []);
   if (!arBound) { bindAutoReply(); arBound = true; }
+  updateAiWarn();
 }
 function renderAutoReplyRules(rules) {
   const box = document.getElementById('arRules');
@@ -973,6 +990,7 @@ function saveAutoReply() {
   const autoReply = currentAutoReply();
   appConfig.autoReply = autoReply;
   patchConfig({ autoReply });
+  updateAiWarn();
 }
 function addAutoReplyRule() {
   const rules = domRules();
